@@ -1,6 +1,8 @@
 import os
 import logging
+import subprocess
 
+from config import BOT_TOKEN, RATE_LIMIT_COUNT, RATE_LIMIT_WINDOW, ADMIN_ID, DOWNLOAD_DIR
 from utils import extract_url, is_tiktok_url, is_instagram_url, RateLimiter, ProgressReporter
 from telegram import Update, InputMediaPhoto
 from telegram.request import HTTPXRequest
@@ -12,7 +14,6 @@ from telegram.ext import (
     filters,
 )
 
-from config import BOT_TOKEN, RATE_LIMIT_COUNT, RATE_LIMIT_WINDOW
 from downloader import download_tiktok, download_instagram, DownloadError, cleanup_job
 
 logging.basicConfig(
@@ -29,6 +30,27 @@ MAX_MEDIA_GROUP = 10  # Telegram's limit per media group
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(
         "Send me a TikTok or Instagram link and I'll download the media for you."
+    )
+
+
+async def restart_bot(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not ADMIN_ID or str(update.effective_user.id) != str(ADMIN_ID):
+        await update.message.reply_text("Kamu tidak punya akses untuk perintah ini.")
+        return
+    status = await update.message.reply_text("Merestart bot...")
+    logger.info("Restart requested by admin %s", update.effective_user.id)
+    # Simpan chat id + message id supaya setelah restart bot bisa hapus
+    # pesan "Merestart bot..." dan kirim konfirmasi
+    try:
+        with open(os.path.join(DOWNLOAD_DIR, ".restart_flag"), "w") as f:
+            f.write(f"{update.effective_chat.id}:{status.message_id}")
+    except Exception:
+        pass
+    # Popen supaya balasan terkirim dulu, lalu service restart
+    subprocess.Popen(
+        ["sudo", "-n", "systemctl", "restart", "telegram-bot"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
     )
 
 
@@ -148,9 +170,26 @@ def main() -> None:
         write_timeout=60,
         pool_timeout=15,
     )
-    app = Application.builder().token(BOT_TOKEN).request(request).build()
+    # Konfirmasi restart otomatis kalau sebelumnya ada /restart
+    async def _on_startup(app):
+        flag = os.path.join(DOWNLOAD_DIR, ".restart_flag")
+        if os.path.exists(flag):
+            try:
+                chat_id_str, msg_id_str = open(flag).read().strip().split(":")
+                chat_id, message_id = int(chat_id_str), int(msg_id_str)
+                os.remove(flag)
+                try:
+                    await app.bot.delete_message(chat_id=chat_id, message_id=message_id)
+                except Exception:
+                    pass
+                await app.bot.send_message(chat_id=chat_id, text="Bot berhasil direstart ✅")
+            except Exception:
+                logger.exception("Failed to send restart confirmation")
+
+    app = Application.builder().token(BOT_TOKEN).request(request).post_init(_on_startup).build()
 
     app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("restart", restart_bot))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.add_error_handler(error_handler)
 
