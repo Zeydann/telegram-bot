@@ -15,6 +15,14 @@ TIKTOK_DOMAINS = (
     "m.tiktok.com",
 )
 
+INSTAGRAM_DOMAINS = (
+    "instagram.com",
+    "www.instagram.com",
+    "m.instagram.com",
+    "ddinstagram.com",
+    "www.ddinstagram.com",
+)
+
 URL_PATTERN = re.compile(r"https?://[^\s]+")
 
 
@@ -33,6 +41,17 @@ def is_tiktok_url(url: str) -> bool:
     except Exception:
         return False
     return any(host == d or host.endswith("." + d) for d in TIKTOK_DOMAINS)
+
+
+def is_instagram_url(url: str) -> bool:
+    """Check whether a URL belongs to a supported Instagram domain."""
+    if not url:
+        return False
+    try:
+        host = (urlparse(url).hostname or "").lower()
+    except Exception:
+        return False
+    return any(host == d or host.endswith("." + d) for d in INSTAGRAM_DOMAINS)
 
 
 def sanitize_filename(name: str) -> str:

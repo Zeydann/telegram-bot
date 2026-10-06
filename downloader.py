@@ -243,6 +243,94 @@ async def download_tiktok(url: str, progress_callback=None) -> DownloadResult:
     cleanup_job(job_dir)
     raise DownloadError("Format media tidak dikenali.")
 
+async def download_instagram(url: str, progress_callback=None) -> DownloadResult:
+    """Download an Instagram post/reel and return a structured result."""
+    job_id = unique_job_id()
+    job_dir = os.path.join(DOWNLOAD_DIR, job_id)
+    os.makedirs(job_dir, exist_ok=True)
+
+    loop = asyncio.get_running_loop()
+
+    def sync_progress_hook(d):
+        if progress_callback is None:
+            return
+        status = d.get("status")
+        if status == "downloading":
+            total = d.get("total_bytes") or d.get("total_bytes_estimate")
+            downloaded = d.get("downloaded_bytes", 0)
+            percent = int(downloaded / total * 100) if total else None
+            downloaded_mb = downloaded / (1024 * 1024)
+            asyncio.run_coroutine_threadsafe(
+                progress_callback(percent, downloaded_mb), loop
+            )
+        elif status == "finished":
+            asyncio.run_coroutine_threadsafe(progress_callback(100, 0.0), loop)
+
+    hook = sync_progress_hook if progress_callback else None
+
+    try:
+        info = await loop.run_in_executor(None, _run_ytdlp, url, job_dir, hook)
+    except yt_dlp.utils.DownloadError as e:
+        cleanup_job(job_dir)
+        msg = str(e).lower()
+        if "login" in msg or "cookies" in msg or "not logged in" in msg:
+            raise DownloadError("Postingan ini memerlukan login (private/akun terkunci).")
+        if "not available" in msg or "removed" in msg or "404" in msg:
+            raise DownloadError("Postingan Instagram sudah dihapus atau tidak ditemukan.")
+        if "rate" in msg or "429" in msg:
+            raise DownloadError("Instagram sedang membatasi request. Coba lagi beberapa saat lagi.")
+        logger.error("yt-dlp download error for %s: %s", url, e)
+        raise DownloadError("Gagal mengambil media dari link Instagram tersebut.")
+    except Exception:
+        cleanup_job(job_dir)
+        logger.exception("Unexpected error downloading %s", url)
+        raise DownloadError("Terjadi kesalahan saat memproses link.")
+
+    author = info.get("uploader") or info.get("creator") or info.get("channel")
+    description = info.get("description") or info.get("title")
+
+    files: list[str] = []
+    for root, _, names in os.walk(job_dir):
+        for name in names:
+            files.append(os.path.join(root, name))
+
+    if not files:
+        cleanup_job(job_dir)
+        raise DownloadError("Media tidak ditemukan untuk link ini.")
+
+    video_exts = {".mp4", ".mov", ".webm", ".mkv"}
+    image_exts = {".jpg", ".jpeg", ".png", ".webp"}
+
+    video_files = [f for f in files if os.path.splitext(f)[1].lower() in video_exts]
+    image_files = sorted(f for f in files if os.path.splitext(f)[1].lower() in image_exts)
+
+    if video_files:
+        video_path = video_files[0]
+        size = os.path.getsize(video_path)
+        if size > MAX_FILE_SIZE:
+            cleanup_job(job_dir)
+            raise DownloadError(
+                f"Ukuran video ({size // (1024*1024)}MB) melebihi batas yang diizinkan."
+            )
+        return DownloadResult(
+            media_type="video",
+            files=[video_path],
+            author=author,
+            description=description,
+        )
+
+    if image_files:
+        return DownloadResult(
+            media_type="images",
+            files=image_files,
+            author=author,
+            description=description,
+        )
+
+    cleanup_job(job_dir)
+    raise DownloadError("Format media tidak dikenali.")
+
+
 def cleanup_job(job_dir: str) -> None:
     """Remove a job's temporary directory and all its contents."""
     try:
