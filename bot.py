@@ -3,7 +3,7 @@ import logging
 import subprocess
 
 from config import BOT_TOKEN, RATE_LIMIT_COUNT, RATE_LIMIT_WINDOW, ADMIN_ID, DOWNLOAD_DIR
-from utils import extract_url, is_tiktok_url, is_instagram_url, RateLimiter, ProgressReporter
+from utils import extract_url, is_tiktok_url, is_instagram_url, is_pinterest_url, RateLimiter, ProgressReporter
 from telegram import Update, InputMediaPhoto
 from telegram.request import HTTPXRequest
 from telegram.ext import (
@@ -14,7 +14,7 @@ from telegram.ext import (
     filters,
 )
 
-from downloader import download_tiktok, download_instagram, DownloadError, cleanup_job
+from downloader import download_tiktok, download_instagram, download_pinterest, DownloadError, cleanup_job
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -65,9 +65,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     is_tiktok = is_tiktok_url(url)
     is_instagram = is_instagram_url(url)
-    if not is_tiktok and not is_instagram:
+    is_pinterest = is_pinterest_url(url)
+    if not is_tiktok and not is_instagram and not is_pinterest:
         await message.reply_text(
-            "Hanya mendukung link TikTok atau Instagram (tiktok.com, vt.tiktok.com, vm.tiktok.com, instagram.com)."
+            "Hanya mendukung link TikTok, Instagram, atau Pinterest (tiktok.com, vt.tiktok.com, vm.tiktok.com, instagram.com, pinterest.com)."
         )
         return
 
@@ -78,7 +79,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         )
         return
 
-    logger.info("User %s requested %s URL", user.id, "TikTok" if is_tiktok else "Instagram")
+    platform = "TikTok" if is_tiktok else ("Instagram" if is_instagram else "Pinterest")
+    logger.info("User %s requested %s URL", user.id, platform)
     status_msg = await message.reply_text("Memproses link...")
 
     job_dir = None
@@ -89,8 +91,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         reporter = ProgressReporter(edit_status)
         if is_tiktok:
             result = await download_tiktok(url, progress_callback=reporter.update)
-        else:
+        elif is_instagram:
             result = await download_instagram(url, progress_callback=reporter.update)
+        else:
+            result = await download_pinterest(url, progress_callback=reporter.update)
         job_dir = os.path.dirname(result.files[0])
         caption = _build_caption(result.author, result.description)
 
