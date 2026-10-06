@@ -15,6 +15,13 @@ TIKTOK_DOMAINS = (
     "m.tiktok.com",
 )
 
+PINTEREST_DOMAINS = (
+    "pinterest.com",
+    "www.pinterest.com",
+    "pin.it",
+    "id.pinterest.com",
+)
+
 INSTAGRAM_DOMAINS = (
     "instagram.com",
     "www.instagram.com",
@@ -52,6 +59,17 @@ def is_instagram_url(url: str) -> bool:
     except Exception:
         return False
     return any(host == d or host.endswith("." + d) for d in INSTAGRAM_DOMAINS)
+
+
+def is_pinterest_url(url: str) -> bool:
+    """Check whether a URL belongs to a supported Pinterest domain."""
+    if not url:
+        return False
+    try:
+        host = (urlparse(url).hostname or "").lower()
+    except Exception:
+        return False
+    return any(host == d or host.endswith("." + d) for d in PINTEREST_DOMAINS)
 
 
 def sanitize_filename(name: str) -> str:

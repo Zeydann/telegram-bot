@@ -48,6 +48,7 @@ def _run_ytdlp(url: str, job_dir: str, progress_hook=None) -> dict:
         "no_warnings": True,
         "socket_timeout": 30,
         "retries": 2,
+        "logger": _YtDlpQuietLogger(),
     }
     if progress_hook:
         ydl_opts["progress_hooks"] = [progress_hook]
@@ -329,6 +330,226 @@ async def download_instagram(url: str, progress_callback=None) -> DownloadResult
 
     cleanup_job(job_dir)
     raise DownloadError("Format media tidak dikenali.")
+
+
+async def _scrape_pinterest(url: str, job_dir: str, progress_callback=None) -> DownloadResult:
+    """Fallback untuk pin Pinterest (gambar) yang tidak didukung yt-dlp."""
+    resolved_url = await _resolve_url(url)
+
+    headers = {"User-Agent": MOBILE_UA, "Referer": "https://www.pinterest.com/"}
+    async with httpx.AsyncClient(headers=headers, timeout=20, follow_redirects=True) as client:
+        resp = await client.get(resolved_url)
+        resp.raise_for_status()
+        html = resp.text
+
+    def _meta_content(prop: str) -> str | None:
+        m = re.search(
+            r'<meta[^>]+(?:property|name)="' + re.escape(prop) + r'"[^>]+content="([^"]+)"',
+            html,
+        )
+        if not m:
+            m = re.search(
+                r'<meta[^>]+content="([^"]+)"[^>]+(?:property|name)="' + re.escape(prop) + r'"',
+                html,
+            )
+        return m.group(1) if m else None
+
+    video_url = _meta_content("og:video:secure_url") or _meta_content("og:video") or _meta_content("og:video:url")
+    image_url = _meta_content("og:image")
+    title = _meta_content("og:title")
+    description = _meta_content("og:description")
+
+    async with httpx.AsyncClient(headers=headers, timeout=30, follow_redirects=True) as client:
+        if video_url:
+            path = os.path.join(job_dir, "video.mp4")
+            async with client.stream("GET", video_url) as r:
+                r.raise_for_status()
+                total = int(r.headers.get("content-length") or 0)
+                downloaded = 0
+                with open(path, "wb") as f:
+                    async for chunk in r.aiter_bytes(65536):
+                        f.write(chunk)
+                        downloaded += len(chunk)
+                        if progress_callback:
+                            percent = int(downloaded / total * 100) if total else None
+                            await progress_callback(percent, downloaded / (1024 * 1024))
+            if progress_callback:
+                await progress_callback(100, 0.0)
+            size = os.path.getsize(path)
+            if size > MAX_FILE_SIZE:
+                cleanup_job(job_dir)
+                raise DownloadError(f"Ukuran video ({size // (1024*1024)}MB) melebihi batas.")
+            return DownloadResult(media_type="video", files=[path], author=None, description=description or title)
+
+        if image_url:
+            hd_url = re.sub(r"/\d+x/", "/originals/", image_url)
+            path = os.path.join(job_dir, "image_hd.jpg")
+            try:
+                async with client.stream("GET", hd_url) as r:
+                    r.raise_for_status()
+                    if "image" not in (r.headers.get("content-type") or ""):
+                        raise ValueError("not an image")
+                    total = int(r.headers.get("content-length") or 0)
+                    downloaded = 0
+                    with open(path, "wb") as f:
+                        async for chunk in r.aiter_bytes(65536):
+                            f.write(chunk)
+                            downloaded += len(chunk)
+                            if progress_callback:
+                                percent = int(downloaded / total * 100) if total else None
+                                await progress_callback(percent, downloaded / (1024 * 1024))
+            except Exception:
+                async with client.stream("GET", image_url) as r:
+                    r.raise_for_status()
+                    total = int(r.headers.get("content-length") or 0)
+                    downloaded = 0
+                    with open(path, "wb") as f:
+                        async for chunk in r.aiter_bytes(65536):
+                            f.write(chunk)
+                            downloaded += len(chunk)
+                            if progress_callback:
+                                percent = int(downloaded / total * 100) if total else None
+                                await progress_callback(percent, downloaded / (1024 * 1024))
+            if progress_callback:
+                await progress_callback(100, 0.0)
+            return DownloadResult(media_type="images", files=[path], author=None, description=description or title)
+
+    raise DownloadError("Tidak ditemukan media di pin Pinterest ini.")
+
+
+async def download_pinterest(url: str, progress_callback=None) -> DownloadResult:
+    """Download a Pinterest pin (image/video) and return a structured result."""
+    job_id = unique_job_id()
+    job_dir = os.path.join(DOWNLOAD_DIR, job_id)
+    os.makedirs(job_dir, exist_ok=True)
+
+    loop = asyncio.get_running_loop()
+
+    def sync_progress_hook(d):
+        if progress_callback is None:
+            return
+        status = d.get("status")
+        if status == "downloading":
+            total = d.get("total_bytes") or d.get("total_bytes_estimate")
+            downloaded = d.get("downloaded_bytes", 0)
+            percent = int(downloaded / total * 100) if total else None
+            downloaded_mb = downloaded / (1024 * 1024)
+            asyncio.run_coroutine_threadsafe(
+                progress_callback(percent, downloaded_mb), loop
+            )
+        elif status == "finished":
+            asyncio.run_coroutine_threadsafe(progress_callback(100, 0.0), loop)
+
+    hook = sync_progress_hook if progress_callback else None
+
+    try:
+        info = await loop.run_in_executor(None, _run_ytdlp, url, job_dir, hook)
+    except yt_dlp.utils.DownloadError as e:
+        msg = str(e).lower()
+        if "not available" in msg or "removed" in msg or "404" in msg:
+            cleanup_job(job_dir)
+            raise DownloadError("Pin Pinterest sudah dihapus atau tidak ditemukan.")
+        if "rate" in msg or "429" in msg:
+            cleanup_job(job_dir)
+            raise DownloadError("Pinterest sedang membatasi request. Coba lagi beberapa saat lagi.")
+        logger.error("yt-dlp download error for %s: %s", url, e)
+        # Fallback: scrape og:image / og:video langsung dari halaman pin
+        try:
+            return await _scrape_pinterest(url, job_dir, progress_callback)
+        except DownloadError:
+            cleanup_job(job_dir)
+            raise
+        except Exception:
+            cleanup_job(job_dir)
+            logger.exception("Pinterest scrape fallback failed for %s", url)
+            raise DownloadError("Gagal mengambil media dari link Pinterest tersebut.")
+    except Exception:
+        cleanup_job(job_dir)
+        logger.exception("Unexpected error downloading %s", url)
+        raise DownloadError("Terjadi kesalahan saat memproses link.")
+
+    author = info.get("uploader") or info.get("creator") or info.get("channel")
+    description = info.get("description") or info.get("title")
+
+    files: list[str] = []
+    for root, _, names in os.walk(job_dir):
+        for name in names:
+            files.append(os.path.join(root, name))
+
+    if not files:
+        cleanup_job(job_dir)
+        raise DownloadError("Media tidak ditemukan untuk link ini.")
+
+    video_exts = {".mp4", ".mov", ".webm", ".mkv"}
+    image_exts = {".jpg", ".jpeg", ".png", ".webp"}
+
+    video_files = [f for f in files if os.path.splitext(f)[1].lower() in video_exts]
+    image_files = sorted(f for f in files if os.path.splitext(f)[1].lower() in image_exts)
+
+    if video_files:
+        video_path = video_files[0]
+        size = os.path.getsize(video_path)
+        if size > MAX_FILE_SIZE:
+            cleanup_job(job_dir)
+            raise DownloadError(
+                f"Ukuran video ({size // (1024*1024)}MB) melebihi batas yang diizinkan."
+            )
+        return DownloadResult(
+            media_type="video",
+            files=[video_path],
+            author=author,
+            description=description,
+        )
+
+    if image_files:
+        # Upgrade ke versi HD/original kalau memungkinkan
+        try:
+            image_files = await _upgrade_pinterest_images(info, image_files, job_dir)
+        except Exception:
+            pass
+        return DownloadResult(
+            media_type="images",
+            files=image_files,
+            author=author,
+            description=description,
+        )
+
+    cleanup_job(job_dir)
+    raise DownloadError("Format media tidak dikenali.")
+
+
+async def _upgrade_pinterest_images(info: dict, image_files: list[str], job_dir: str) -> list[str]:
+    """Ganti file gambar hasil yt-dlp dengan versi originals (HD) dari pinimg."""
+    possible_urls = []
+    for key in ("url", "thumbnail"):
+        v = info.get(key)
+        if isinstance(v, str):
+            possible_urls.append(v)
+    for t in info.get("thumbnails") or []:
+        if isinstance(t, dict) and isinstance(t.get("url"), str):
+            possible_urls.append(t["url"])
+
+    original_url = None
+    for u in possible_urls:
+        if "pinimg.com" in u:
+            upgraded = re.sub(r"/\d+x/", "/originals/", u)
+            if upgraded != u or "/originals/" in u:
+                original_url = upgraded
+                break
+
+    if not original_url:
+        return image_files
+
+    headers = {"User-Agent": MOBILE_UA, "Referer": "https://www.pinterest.com/"}
+    async with httpx.AsyncClient(headers=headers, timeout=30, follow_redirects=True) as client:
+        r = await client.get(original_url)
+        r.raise_for_status()
+        if "image" not in (r.headers.get("content-type") or ""):
+            return image_files
+        path = os.path.join(job_dir, "image_hd.jpg")
+        with open(path, "wb") as f:
+            f.write(r.content)
+    return [path]
 
 
 def cleanup_job(job_dir: str) -> None:
