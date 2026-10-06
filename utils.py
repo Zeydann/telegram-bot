@@ -69,3 +69,39 @@ class RateLimiter:
             return 0
         elapsed = time.monotonic() - q[0]
         return max(0, int(self.window_seconds - elapsed))
+
+class ProgressReporter:
+    """Throttled progress bar updater for a Telegram status message."""
+
+    def __init__(self, edit_func, min_interval: float = 1.5):
+        self.edit_func = edit_func  # async callable(text: str)
+        self.min_interval = min_interval
+        self._last_time = 0.0
+        self._last_percent: int | None = -1
+
+    async def update(self, percent: int | None, downloaded_mb: float = 0.0) -> None:
+        now = time.monotonic()
+
+        if percent == self._last_percent:
+            return
+        if percent is not None and percent < 100 and (now - self._last_time) < self.min_interval:
+            return
+
+        self._last_time = now
+        self._last_percent = percent
+
+        if percent is not None:
+            bar = self._make_bar(percent)
+            text = f"Mengambil media...\n{bar} {percent}%"
+        else:
+            text = f"Mengambil media...\n({downloaded_mb:.1f} MB terunduh)"
+
+        try:
+            await self.edit_func(text)
+        except Exception:
+            pass  # ignore "message not modified" or transient edit errors
+
+    @staticmethod
+    def _make_bar(percent: int, length: int = 12) -> str:
+        filled = int(length * percent / 100)
+        return "[" + "█" * filled + "░" * (length - filled) + "]"
