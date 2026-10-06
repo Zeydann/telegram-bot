@@ -1,11 +1,12 @@
 # Telegram Bot
 
-A Telegram bot that downloads TikTok videos and photo slideshows (without watermark, when supported by the source) and sends them back to the user. Built to be extensible for other platforms in the future.
+A Telegram bot that downloads TikTok & Instagram videos and photo slideshows (without watermark, when supported by the source) and sends them back to the user. Built to be extensible for other platforms in the future.
 
 ## Features
-- Validates TikTok URLs (including short links `vt.tiktok.com` / `vm.tiktok.com`)
+- Validates TikTok and Instagram URLs (including TikTok short links `vt.tiktok.com` / `vm.tiktok.com`)
 - Downloads video posts via `yt-dlp`
 - Downloads photo/slideshow posts via a custom scraper fallback (mobile User-Agent, since `yt-dlp` doesn't support TikTok photo posts)
+- Downloads Instagram reels/posts via `yt-dlp` (public posts only; private posts require cookies)
 - Sends status updates while processing
 - Per-user rate limiting
 - Automatic cleanup of temporary files

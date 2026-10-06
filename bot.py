@@ -1,7 +1,7 @@
 import os
 import logging
 
-from utils import extract_url, is_tiktok_url, RateLimiter, ProgressReporter
+from utils import extract_url, is_tiktok_url, is_instagram_url, RateLimiter, ProgressReporter
 from telegram import Update, InputMediaPhoto
 from telegram.request import HTTPXRequest
 from telegram.ext import (
@@ -13,8 +13,7 @@ from telegram.ext import (
 )
 
 from config import BOT_TOKEN, RATE_LIMIT_COUNT, RATE_LIMIT_WINDOW
-from utils import extract_url, is_tiktok_url, RateLimiter
-from downloader import download_tiktok, DownloadError, cleanup_job
+from downloader import download_tiktok, download_instagram, DownloadError, cleanup_job
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -29,7 +28,7 @@ MAX_MEDIA_GROUP = 10  # Telegram's limit per media group
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(
-        "Send me a TikTok link and I'll download the media for you."
+        "Send me a TikTok or Instagram link and I'll download the media for you."
     )
 
 
@@ -41,9 +40,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     url = extract_url(text)
     if not url:
         return  # Bukan link, abaikan saja
-    if not is_tiktok_url(url):
+
+    is_tiktok = is_tiktok_url(url)
+    is_instagram = is_instagram_url(url)
+    if not is_tiktok and not is_instagram:
         await message.reply_text(
-            "Hanya mendukung link TikTok (tiktok.com, vt.tiktok.com, atau vm.tiktok.com)."
+            "Hanya mendukung link TikTok atau Instagram (tiktok.com, vt.tiktok.com, vm.tiktok.com, instagram.com)."
         )
         return
 
@@ -54,7 +56,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         )
         return
 
-    logger.info("User %s requested TikTok URL", user.id)
+    logger.info("User %s requested %s URL", user.id, "TikTok" if is_tiktok else "Instagram")
     status_msg = await message.reply_text("Memproses link...")
 
     job_dir = None
@@ -63,7 +65,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             await status_msg.edit_text(text)
 
         reporter = ProgressReporter(edit_status)
-        result = await download_tiktok(url, progress_callback=reporter.update)
+        if is_tiktok:
+            result = await download_tiktok(url, progress_callback=reporter.update)
+        else:
+            result = await download_instagram(url, progress_callback=reporter.update)
         job_dir = os.path.dirname(result.files[0])
         caption = _build_caption(result.author, result.description)
 
