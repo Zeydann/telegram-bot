@@ -73,12 +73,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             with open(result.files[0], "rb") as f:
                 try:
                     await message.reply_video(
-                        video=f, caption=caption, read_timeout=120, write_timeout=120
+                        video=f, caption=caption, parse_mode="HTML",
+                        read_timeout=120, write_timeout=120
                     )
                 except Exception as send_err:
                     logger.warning("send_video failed, falling back to document: %s", send_err)
                     f.seek(0)
-                    await message.reply_document(document=f, caption=caption)
+                    await message.reply_document(document=f, caption=caption, parse_mode="HTML")
+
         else:
             await _send_image_group(message, result.files, caption)
 
@@ -96,17 +98,17 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             cleanup_job(job_dir)
 
 
-def _build_caption(author: str | None, description: str | None) -> str:
-    lines = ["TikTok downloaded successfully."]
-    if author:
-        lines.append(f"Author: @{author}")
-    if description:
-        desc = description.strip()
-        if len(desc) > 500:
-            desc = desc[:497] + "..."
-        lines.append(f"Description: {desc}")
-    return "\n".join(lines)
+import html as html_lib
 
+
+def _build_caption(author: str | None, description: str | None) -> str:
+    lines = []
+    if author:
+        lines.append(f"Author: @{html_lib.escape(author)}")
+    if description:
+        desc = html_lib.escape(description.strip())
+        lines.append(f"<blockquote expandable>{desc}</blockquote>")
+    return "\n".join(lines)
 
 async def _send_image_group(message, files: list[str], caption: str) -> None:
     batches = [files[i:i + MAX_MEDIA_GROUP] for i in range(0, len(files), MAX_MEDIA_GROUP)]
@@ -118,12 +120,9 @@ async def _send_image_group(message, files: list[str], caption: str) -> None:
                 f = open(path, "rb")
                 opened_files.append(f)
                 cap = caption if (batch_index == 0 and i == 0) else None
-                media.append(InputMediaPhoto(media=f, caption=cap))
+                media.append(InputMediaPhoto(media=f, caption=cap, parse_mode="HTML" if cap else None))
             await message.reply_media_group(
-                media=media,
-                read_timeout=180,
-                write_timeout=180,
-                connect_timeout=30,
+                media=media, read_timeout=180, write_timeout=180, connect_timeout=30
             )
     finally:
         for f in opened_files:
