@@ -10,7 +10,7 @@ from dataclasses import dataclass, field
 import yt_dlp
 
 from utils import unique_job_id
-from config import DOWNLOAD_DIR, MAX_FILE_SIZE
+from config import DOWNLOAD_DIR, MAX_FILE_SIZE, INSTAGRAM_COOKIEFILE
 
 logger = logging.getLogger(__name__)
 
@@ -36,7 +36,7 @@ class DownloadResult:
     description: str | None = None
 
 
-def _run_ytdlp(url: str, job_dir: str, progress_hook=None) -> dict:
+def _run_ytdlp(url: str, job_dir: str, progress_hook=None, cookiefile=None) -> dict:
     """Blocking yt-dlp extraction; run inside a thread."""
     outtmpl = os.path.join(job_dir, "%(id)s.%(ext)s")
     ydl_opts = {
@@ -52,6 +52,8 @@ def _run_ytdlp(url: str, job_dir: str, progress_hook=None) -> dict:
     }
     if progress_hook:
         ydl_opts["progress_hooks"] = [progress_hook]
+    if cookiefile:
+        ydl_opts["cookiefile"] = cookiefile
 
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         info = ydl.extract_info(url, download=True)
@@ -270,7 +272,9 @@ async def download_instagram(url: str, progress_callback=None) -> DownloadResult
     hook = sync_progress_hook if progress_callback else None
 
     try:
-        info = await loop.run_in_executor(None, _run_ytdlp, url, job_dir, hook)
+        info = await loop.run_in_executor(
+            None, _run_ytdlp, url, job_dir, hook, INSTAGRAM_COOKIEFILE or None
+        )
     except yt_dlp.utils.DownloadError as e:
         cleanup_job(job_dir)
         msg = str(e).lower()
