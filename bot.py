@@ -1,6 +1,7 @@
 import os
 import logging
 
+from utils import extract_url, is_tiktok_url, RateLimiter, ProgressReporter
 from telegram import Update, InputMediaPhoto
 from telegram.request import HTTPXRequest
 from telegram.ext import (
@@ -58,10 +59,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     job_dir = None
     try:
-        await status_msg.edit_text("Mengambil media...")
-        result = await download_tiktok(url)
-        job_dir = os.path.dirname(result.files[0])
+        async def edit_status(text: str):
+            await status_msg.edit_text(text)
 
+        reporter = ProgressReporter(edit_status)
+        result = await download_tiktok(url, progress_callback=reporter.update)
+        job_dir = os.path.dirname(result.files[0])
         caption = _build_caption(result.author, result.description)
 
         await status_msg.edit_text("Mengirim media...")

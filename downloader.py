@@ -36,7 +36,7 @@ class DownloadResult:
     description: str | None = None
 
 
-def _run_ytdlp(url: str, job_dir: str) -> dict:
+def _run_ytdlp(url: str, job_dir: str, progress_hook=None) -> dict:
     """Blocking yt-dlp extraction; run inside a thread."""
     outtmpl = os.path.join(job_dir, "%(id)s.%(ext)s")
     ydl_opts = {
@@ -48,12 +48,13 @@ def _run_ytdlp(url: str, job_dir: str) -> dict:
         "no_warnings": True,
         "socket_timeout": 30,
         "retries": 2,
-        "logger": _YtDlpQuietLogger(),
     }
+    if progress_hook:
+        ydl_opts["progress_hooks"] = [progress_hook]
+
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         info = ydl.extract_info(url, download=True)
     return info
-
 
 MOBILE_UA = (
     "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 "
@@ -67,12 +68,14 @@ async def _resolve_url(url: str) -> str:
         resp = await client.get(url)
         return str(resp.url)
 
-
-async def _scrape_photo_post(url: str, job_dir: str) -> DownloadResult:
+async def _scrape_photo_post(url: str, job_dir: str, progress_callback=None) -> DownloadResult:
     """Fallback for TikTok photo/slideshow posts not supported by yt-dlp."""
     resolved_url = await _resolve_url(url)
 
-    headers = {"User-Agent": MOBILE_UA, "Referer": "https://www.tiktok.com/"}
+    headers = {
+        "User-Agent": MOBILE_UA,
+        "Referer": "https://www.tiktok.com/",
+    }
 
     async with httpx.AsyncClient(headers=headers, timeout=20, follow_redirects=True) as client:
         resp = await client.get(resolved_url)
@@ -102,9 +105,9 @@ async def _scrape_photo_post(url: str, job_dir: str) -> DownloadResult:
             raise DownloadError("Postingan ini bukan slideshow foto.")
 
         image_urls = [
-            url_item
+            img["imageURL"]["urlList"][0]
             for img in image_post["images"]
-            for url_item in (img.get("imageURL", {}).get("urlList") or [])[:1]
+            if img.get("imageURL", {}).get("urlList")
         ]
         author = item_struct.get("author", {}).get("uniqueId")
         description = item_struct.get("desc")
@@ -116,6 +119,7 @@ async def _scrape_photo_post(url: str, job_dir: str) -> DownloadResult:
         raise DownloadError("Tidak ada gambar yang ditemukan dalam postingan ini.")
 
     files = []
+    total = len(image_urls)
     async with httpx.AsyncClient(headers=headers, timeout=30, follow_redirects=True) as client:
         for i, img_url in enumerate(image_urls):
             try:
@@ -128,6 +132,10 @@ async def _scrape_photo_post(url: str, job_dir: str) -> DownloadResult:
             except Exception as e:
                 logger.warning("Failed to download image %d: %s", i, e)
 
+            if progress_callback:
+                percent = int((i + 1) / total * 100)
+                await progress_callback(percent, 0.0)
+
     if not files:
         raise DownloadError("Gagal mengunduh gambar dari postingan ini.")
 
@@ -138,20 +146,38 @@ async def _scrape_photo_post(url: str, job_dir: str) -> DownloadResult:
         description=description,
     )
 
-async def download_tiktok(url: str) -> DownloadResult:
+async def download_tiktok(url: str, progress_callback=None) -> DownloadResult:
     """Download a TikTok URL and return a structured result."""
     job_id = unique_job_id()
     job_dir = os.path.join(DOWNLOAD_DIR, job_id)
     os.makedirs(job_dir, exist_ok=True)
 
+    loop = asyncio.get_running_loop()
+
+    def sync_progress_hook(d):
+        if progress_callback is None:
+            return
+        status = d.get("status")
+        if status == "downloading":
+            total = d.get("total_bytes") or d.get("total_bytes_estimate")
+            downloaded = d.get("downloaded_bytes", 0)
+            percent = int(downloaded / total * 100) if total else None
+            downloaded_mb = downloaded / (1024 * 1024)
+            asyncio.run_coroutine_threadsafe(
+                progress_callback(percent, downloaded_mb), loop
+            )
+        elif status == "finished":
+            asyncio.run_coroutine_threadsafe(progress_callback(100, 0.0), loop)
+
+    hook = sync_progress_hook if progress_callback else None
+
     try:
-        loop = asyncio.get_running_loop()
-        info = await loop.run_in_executor(None, _run_ytdlp, url, job_dir)
+        info = await loop.run_in_executor(None, _run_ytdlp, url, job_dir, hook)
     except yt_dlp.utils.DownloadError as e:
         msg = str(e).lower()
         if "unsupported url" in msg and "/photo/" in msg:
             try:
-                return await _scrape_photo_post(url, job_dir)
+                return await _scrape_photo_post(url, job_dir, progress_callback)
             except DownloadError:
                 cleanup_job(job_dir)
                 raise
@@ -216,7 +242,6 @@ async def download_tiktok(url: str) -> DownloadResult:
 
     cleanup_job(job_dir)
     raise DownloadError("Format media tidak dikenali.")
-
 
 def cleanup_job(job_dir: str) -> None:
     """Remove a job's temporary directory and all its contents."""
