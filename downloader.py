@@ -5,6 +5,7 @@ import os
 import asyncio
 import logging
 import shutil
+import http.cookiejar as _cj
 from dataclasses import dataclass, field
 
 import yt_dlp
@@ -276,16 +277,34 @@ async def download_instagram(url: str, progress_callback=None) -> DownloadResult
             None, _run_ytdlp, url, job_dir, hook, INSTAGRAM_COOKIEFILE or None
         )
     except yt_dlp.utils.DownloadError as e:
-        cleanup_job(job_dir)
         msg = str(e).lower()
         if "login" in msg or "cookies" in msg or "not logged in" in msg:
+            cleanup_job(job_dir)
             raise DownloadError("Postingan ini memerlukan login (private/akun terkunci).")
         if "not available" in msg or "removed" in msg or "404" in msg:
+            cleanup_job(job_dir)
             raise DownloadError("Postingan Instagram sudah dihapus atau tidak ditemukan.")
         if "rate" in msg or "429" in msg:
+            cleanup_job(job_dir)
             raise DownloadError("Instagram sedang membatasi request. Coba lagi beberapa saat lagi.")
         logger.error("yt-dlp download error for %s: %s", url, e)
-        raise DownloadError("Gagal mengambil media dari link Instagram tersebut.")
+        # Fallback 1: instaloader (full resolution photos/videos)
+        try:
+            return await _instaloader_fetch(url, job_dir, progress_callback)
+        except DownloadError as inl_err:
+            logger.warning("instaloader failed for %s: %s", url, inl_err)
+        except Exception:
+            logger.exception("instaloader failed for %s", url)
+        # Fallback 2: scrape og:image / og:video langsung dari halaman postingan
+        try:
+            return await _scrape_instagram(url, job_dir, progress_callback)
+        except DownloadError:
+            cleanup_job(job_dir)
+            raise
+        except Exception:
+            cleanup_job(job_dir)
+            logger.exception("Instagram scrape fallback failed for %s", url)
+            raise DownloadError("Gagal mengambil media dari link Instagram tersebut.")
     except Exception:
         cleanup_job(job_dir)
         logger.exception("Unexpected error downloading %s", url)
@@ -419,6 +438,179 @@ async def _scrape_pinterest(url: str, job_dir: str, progress_callback=None) -> D
             return DownloadResult(media_type="images", files=[path], author=None, description=description or title)
 
     raise DownloadError("Tidak ditemukan media di pin Pinterest ini.")
+
+
+def _instagram_httpx_cookies() -> httpx.Cookies:
+    c = httpx.Cookies()
+    if INSTAGRAM_COOKIEFILE and os.path.exists(INSTAGRAM_COOKIEFILE):
+        jar: _cj.MozillaCookieJar = _cj.MozillaCookieJar(INSTAGRAM_COOKIEFILE)
+        try:
+            jar.load(ignore_discard=True, ignore_expires=True)
+            for cookie in jar:
+                c.set(cookie.name, cookie.value, domain=cookie.domain, path=cookie.path)
+        except Exception:
+            logger.warning("Failed to load Instagram cookies from %s", INSTAGRAM_COOKIEFILE)
+    return c
+
+
+async def _instaloader_fetch(url: str, job_dir: str, progress_callback=None) -> DownloadResult:
+    """Ambil post Instagram dengan instaloader (foto resolusi penuh & video)."""
+    m = re.search(r"/(?:p|reel|tv|reels)/([A-Za-z0-9_-]+)", url)
+    if not m:
+        raise DownloadError("Tidak bisa membaca shortcode dari link Instagram.")
+    shortcode = m.group(1)
+
+    def _extract():
+        import instaloader
+
+        L = instaloader.Instaloader(
+            download_pictures=False,
+            download_videos=False,
+            download_comments=False,
+            save_metadata=False,
+            compress_json=False,
+            quiet=True,
+        )
+        # Pakai cookies yang sama kalau ada
+        if INSTAGRAM_COOKIEFILE and os.path.exists(INSTAGRAM_COOKIEFILE):
+            try:
+                jar = _cj.MozillaCookieJar(INSTAGRAM_COOKIEFILE)
+                jar.load(ignore_discard=True, ignore_expires=True)
+                for cookie in jar:
+                    L.context._session.cookies.set(
+                        cookie.name, cookie.value, domain=cookie.domain, path=cookie.path
+                    )
+            except Exception:
+                pass
+        post = instaloader.Post.from_shortcode(L.context, shortcode)
+
+        items = []
+        if post.typename == "GraphSidecar":
+            for node in post.get_sidecar_nodes():
+                items.append((node.is_video, node.video_url if node.is_video else node.display_url))
+        elif post.is_video:
+            items.append((True, post.video_url))
+        else:
+            items.append((False, post.url))
+        return items, post.owner_username, post.caption
+
+    try:
+        loop = asyncio.get_running_loop()
+        items, author, caption = await loop.run_in_executor(None, _extract)
+    except Exception as e:
+        raise DownloadError(f"Gagal membaca post Instagram via instaloader: {e}")
+
+    if not items:
+        raise DownloadError("Tidak ditemukan media pada postingan ini.")
+
+    cookies = _instagram_httpx_cookies()
+    headers = {"User-Agent": MOBILE_UA, "Referer": "https://www.instagram.com/"}
+    async with httpx.AsyncClient(headers=headers, cookies=cookies, timeout=30, follow_redirects=True) as client:
+        files = []
+        for i, (is_video, media_url) in enumerate(items):
+            ext = "mp4" if is_video else "jpg"
+            path = os.path.join(job_dir, f"media_{i}.{ext}")
+            try:
+                async with client.stream("GET", media_url) as r:
+                    r.raise_for_status()
+                    total = int(r.headers.get("content-length") or 0)
+                    downloaded = 0
+                    with open(path, "wb") as f:
+                        async for chunk in r.aiter_bytes(65536):
+                            f.write(chunk)
+                            downloaded += len(chunk)
+                            if progress_callback:
+                                percent = int(downloaded / total * 100) if total else None
+                                await progress_callback(percent, downloaded / (1024 * 1024))
+                files.append(path)
+            except Exception as e:
+                logger.warning("Failed to download instaloader media %d: %s", i, e)
+
+    if not files:
+        raise DownloadError("Gagal mengunduh media dari postingan ini.")
+
+    if progress_callback:
+        await progress_callback(100, 0.0)
+
+    video_files = [f for f in files if f.endswith(".mp4")]
+    if video_files:
+        video_path = video_files[0]
+        size = os.path.getsize(video_path)
+        if size > MAX_FILE_SIZE:
+            cleanup_job(job_dir)
+            raise DownloadError(f"Ukuran video ({size // (1024*1024)}MB) melebihi batas.")
+        return DownloadResult(media_type="video", files=[video_path], author=author, description=caption)
+
+    return DownloadResult(media_type="images", files=sorted(files), author=author, description=caption)
+
+
+async def _scrape_instagram(url: str, job_dir: str, progress_callback=None) -> DownloadResult:
+    """Fallback untuk foto/video Instagram yang tidak didukung yt-dlp."""
+    resolved_url = await _resolve_url(url)
+
+    headers = {"User-Agent": MOBILE_UA, "Referer": "https://www.instagram.com/"}
+    cookies = _instagram_httpx_cookies()
+    async with httpx.AsyncClient(headers=headers, cookies=cookies, timeout=20, follow_redirects=True) as client:
+        resp = await client.get(resolved_url)
+        resp.raise_for_status()
+        html = resp.text
+
+    def _meta_content(prop: str) -> str | None:
+        m = re.search(
+            r'<meta[^>]+(?:property|name)="' + re.escape(prop) + r'"[^>]+content="([^"]+)"',
+            html,
+        )
+        if not m:
+            m = re.search(
+                r'<meta[^>]+content="([^"]+)"[^>]+(?:property|name)="' + re.escape(prop) + r'"',
+                html,
+            )
+        return m.group(1) if m else None
+
+    video_url = _meta_content("og:video:secure_url") or _meta_content("og:video") or _meta_content("og:video:url")
+    image_url = _meta_content("og:image")
+    description = _meta_content("og:description")
+
+    async with httpx.AsyncClient(headers=headers, cookies=cookies, timeout=30, follow_redirects=True) as client:
+        if video_url:
+            path = os.path.join(job_dir, "video.mp4")
+            async with client.stream("GET", video_url.replace("&amp;", "&")) as r:
+                r.raise_for_status()
+                total = int(r.headers.get("content-length") or 0)
+                downloaded = 0
+                with open(path, "wb") as f:
+                    async for chunk in r.aiter_bytes(65536):
+                        f.write(chunk)
+                        downloaded += len(chunk)
+                        if progress_callback:
+                            percent = int(downloaded / total * 100) if total else None
+                            await progress_callback(percent, downloaded / (1024 * 1024))
+            if progress_callback:
+                await progress_callback(100, 0.0)
+            size = os.path.getsize(path)
+            if size > MAX_FILE_SIZE:
+                cleanup_job(job_dir)
+                raise DownloadError(f"Ukuran video ({size // (1024*1024)}MB) melebihi batas.")
+            return DownloadResult(media_type="video", files=[path], author=None, description=description)
+
+        if image_url:
+            path = os.path.join(job_dir, "image_hd.jpg")
+            async with client.stream("GET", image_url.replace("&amp;", "&")) as r:
+                r.raise_for_status()
+                total = int(r.headers.get("content-length") or 0)
+                downloaded = 0
+                with open(path, "wb") as f:
+                    async for chunk in r.aiter_bytes(65536):
+                        f.write(chunk)
+                        downloaded += len(chunk)
+                        if progress_callback:
+                            percent = int(downloaded / total * 100) if total else None
+                            await progress_callback(percent, downloaded / (1024 * 1024))
+            if progress_callback:
+                await progress_callback(100, 0.0)
+            return DownloadResult(media_type="images", files=[path], author=None, description=description)
+
+    raise DownloadError("Tidak ditemukan media di postingan Instagram ini.")
 
 
 async def download_pinterest(url: str, progress_callback=None) -> DownloadResult:
