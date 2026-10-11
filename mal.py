@@ -46,8 +46,6 @@ async def search_anime(query: str) -> dict | None:
 
     m = re.search(r'<p itemprop="description">(.*?)</p>', page, re.S)
     synopsis = _strip_tags(m.group(1)) if m else None
-    if synopsis and len(synopsis) > 350:
-        synopsis = synopsis[:347].rsplit(" ", 1)[0] + "..."
 
     m = re.search(r'<meta property="og:image" content="([^"]+)"', page)
     image_url = m.group(1) if m else None
@@ -61,3 +59,17 @@ async def search_anime(query: str) -> dict | None:
         "url": links[0],
         "image": image_url,
     }
+
+
+async def fetch_hd_image(url: str) -> str:
+    """MAL punya versi cover besar dengan akhiran 'l.jpg' — pakai itu kalau ada."""
+    if url and url.endswith(".jpg"):
+        hd = url[:-4] + "l.jpg"
+        try:
+            async with httpx.AsyncClient(headers=MAL_HEADERS, timeout=15) as client:
+                resp = await client.head(hd, follow_redirects=True)
+                if resp.status_code == 200:
+                    return hd
+        except Exception:
+            pass
+    return url

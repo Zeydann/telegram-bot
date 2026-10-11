@@ -4,7 +4,7 @@ import subprocess
 import html as html_lib
 
 from config import BOT_TOKEN, RATE_LIMIT_COUNT, RATE_LIMIT_WINDOW, ADMIN_ID, DOWNLOAD_DIR
-from mal import search_anime
+from mal import search_anime, fetch_hd_image
 from utils import extract_url, is_tiktok_url, is_instagram_url, is_pinterest_url, RateLimiter, ProgressReporter
 from telegram import Update, InputMediaPhoto
 from telegram.request import HTTPXRequest
@@ -53,22 +53,33 @@ async def anime(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await status_msg.edit_text(f'Anime "{query}" tidak ditemukan di MyAnimeList.')
         return
 
-    lines = [
-        f"<b>{html_lib.escape(result['title'])}</b>",
-        f"📺 Episodes: {result['episodes']}",
-        f"🎬 Status: {result['status']}",
-        f"⭐ Score: {result['score']}",
-        "",
-        f"<blockquote expandable>{html_lib.escape(result['synopsis'])}</blockquote>",
-        f"<a href=\"{result['url']}\">MyAnimeList</a>",
-    ]
-    caption = "\n".join(lines)
+    # Satu pesan: foto + caption berisi info + sinopsis (limit caption 1024 karakter)
+    header = (
+        f"{result['title']}\n"
+        f"📺 Episodes: {result['episodes']}\n"
+        f"🎬 Status: {result['status']}\n"
+        f"⭐ Score: {result['score']}\n"
+    )
+    link_line = f"MyAnimeList: {result['url']}"
+    synopsis = result["synopsis"]
+    # Sisa ruang di caption untuk sinopsis
+    budget = 1024 - len(header) - len(link_line) - len("\n\n") - len("\nSinopsis:\n")
+    if len(synopsis) > budget:
+        synopsis = synopsis[: max(budget - 3, 0)].rsplit(" ", 1)[0] + "..."
+        if len(synopsis) > budget:
+            synopsis = synopsis[:budget]
+
+    caption = (
+        f"<b>{html_lib.escape(header)}</b>\n"
+        f"Sinopsis:\n"
+        f"<blockquote expandable>{html_lib.escape(synopsis)}</blockquote>\n"
+        f'<a href="{result["url"]}">MyAnimeList</a>'
+    )
 
     if result.get("image"):
+        image_url = await fetch_hd_image(result["image"])
         try:
-            await update.message.reply_photo(
-                photo=result["image"], caption=caption, parse_mode="HTML"
-            )
+            await update.message.reply_photo(photo=image_url, caption=caption, parse_mode="HTML")
             await status_msg.delete()
         except Exception:
             logger.warning("send_photo failed, falling back to text for %s", query)
