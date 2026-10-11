@@ -62,11 +62,19 @@ async def anime(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         f"<blockquote expandable>{html_lib.escape(result['synopsis'])}</blockquote>",
         f"<a href=\"{result['url']}\">MyAnimeList</a>",
     ]
-    await status_msg.edit_text(
-        "\n".join(lines),
-        parse_mode="HTML",
-        disable_web_page_preview=True,
-    )
+    caption = "\n".join(lines)
+
+    if result.get("image"):
+        try:
+            await update.message.reply_photo(
+                photo=result["image"], caption=caption, parse_mode="HTML"
+            )
+            await status_msg.delete()
+        except Exception:
+            logger.warning("send_photo failed, falling back to text for %s", query)
+            await status_msg.edit_text(caption, parse_mode="HTML", disable_web_page_preview=True)
+    else:
+        await status_msg.edit_text(caption, parse_mode="HTML", disable_web_page_preview=True)
 
 
 async def restart_bot(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

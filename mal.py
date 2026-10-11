@@ -49,6 +49,9 @@ async def search_anime(query: str) -> dict | None:
     if synopsis and len(synopsis) > 350:
         synopsis = synopsis[:347].rsplit(" ", 1)[0] + "..."
 
+    m = re.search(r'<meta property="og:image" content="([^"]+)"', page)
+    image_url = m.group(1) if m else None
+
     return {
         "title": title,
         "episodes": episodes or "?",
@@ -56,4 +59,5 @@ async def search_anime(query: str) -> dict | None:
         "score": score,
         "synopsis": synopsis or "Tidak ada deskripsi.",
         "url": links[0],
+        "image": image_url,
     }
