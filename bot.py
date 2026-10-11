@@ -1,8 +1,10 @@
 import os
 import logging
 import subprocess
+import html as html_lib
 
 from config import BOT_TOKEN, RATE_LIMIT_COUNT, RATE_LIMIT_WINDOW, ADMIN_ID, DOWNLOAD_DIR
+from mal import search_anime
 from utils import extract_url, is_tiktok_url, is_instagram_url, is_pinterest_url, RateLimiter, ProgressReporter
 from telegram import Update, InputMediaPhoto
 from telegram.request import HTTPXRequest
@@ -30,6 +32,40 @@ MAX_MEDIA_GROUP = 10  # Telegram's limit per media group
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(
         "Send me a TikTok or Instagram link and I'll download the media for you."
+    )
+
+
+async def anime(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = " ".join(context.args).strip()
+    if not query:
+        await update.message.reply_text("Pakai: /anime judul anime\nContoh: /anime Naruto")
+        return
+
+    status_msg = await update.message.reply_text("Mencari di MyAnimeList...")
+    try:
+        result = await search_anime(query)
+    except Exception:
+        logger.exception("MAL search failed for %s", query)
+        await status_msg.edit_text("Gagal menghubungi MyAnimeList. Coba lagi nanti.")
+        return
+
+    if not result:
+        await status_msg.edit_text(f'Anime "{query}" tidak ditemukan di MyAnimeList.')
+        return
+
+    lines = [
+        f"<b>{html_lib.escape(result['title'])}</b>",
+        f"📺 Episodes: {result['episodes']}",
+        f"🎬 Status: {result['status']}",
+        f"⭐ Score: {result['score']}",
+        "",
+        f"<blockquote expandable>{html_lib.escape(result['synopsis'])}</blockquote>",
+        f"<a href=\"{result['url']}\">MyAnimeList</a>",
+    ]
+    await status_msg.edit_text(
+        "\n".join(lines),
+        parse_mode="HTML",
+        disable_web_page_preview=True,
     )
 
 
@@ -211,6 +247,7 @@ def main() -> None:
     app = Application.builder().token(BOT_TOKEN).request(request).post_init(_on_startup).build()
 
     app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("anime", anime))
     app.add_handler(CommandHandler("restart", restart_bot))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.add_error_handler(error_handler)
