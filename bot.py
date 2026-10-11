@@ -1,11 +1,16 @@
 import os
+import shutil
 import logging
 import subprocess
+import tempfile
 import html as html_lib
 
-from config import BOT_TOKEN, RATE_LIMIT_COUNT, RATE_LIMIT_WINDOW, ADMIN_ID, DOWNLOAD_DIR
+from config import (
+    BOT_TOKEN, RATE_LIMIT_COUNT, RATE_LIMIT_WINDOW, ADMIN_ID, DOWNLOAD_DIR,
+    CONVERT_MAX_FILE_SIZE,
+)
 from mal import search_anime, fetch_hd_image
-from utils import extract_url, is_tiktok_url, is_instagram_url, is_pinterest_url, RateLimiter, ProgressReporter
+from utils import extract_url, is_tiktok_url, is_instagram_url, is_pinterest_url, sanitize_filename, RateLimiter, ProgressReporter
 from telegram import Update, InputMediaPhoto
 from telegram.request import HTTPXRequest
 from telegram.ext import (
@@ -17,6 +22,15 @@ from telegram.ext import (
 )
 
 from downloader import download_tiktok, download_instagram, download_pinterest, DownloadError, cleanup_job
+from converter import (
+    ConversionError,
+    ILOVEPDF_CREDIT,
+    convert_pdf_to_word,
+    convert_word_to_pdf,
+    inspect_pdf,
+    inspect_word,
+    validate_document,
+)
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -31,7 +45,10 @@ MAX_MEDIA_GROUP = 10  # Telegram's limit per media group
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(
-        "Send me a TikTok or Instagram link and I'll download the media for you."
+        "Send me a TikTok or Instagram link and I'll download the media for you.\n\n"
+        "Document converters:\n"
+        "/pdf — reply to a PDF to get a .docx\n"
+        "/word — reply to a Word file to get a PDF (Word → PDF conversion powered by iLovePDF)"
     )
 
 
@@ -107,6 +124,149 @@ async def restart_bot(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )
+
+
+CONVERT_HELP = {
+    "pdf": (
+        "Cara pakai /pdf:\n"
+        "1. Kirim file PDF ke bot ini\n"
+        "2. Balas file tersebut dengan perintah /pdf\n"
+        "(alternatif: kirim PDF dengan caption /pdf)\n\n"
+        "Hasilnya file .docx. Catatan: PDF hasil scan tanpa teks butuh OCR, "
+        "layoutnya tidak dijamin 100% sama."
+    ),
+    "word": (
+        "Cara pakai /word:\n"
+        "1. Kirim file Word (.docx/.doc) ke bot ini\n"
+        "2. Balas file tersebut dengan perintah /word\n"
+        "(alternatif: kirim dokumen dengan caption /word)\n\n"
+        f"{ILOVEPDF_CREDIT}"
+    ),
+}
+
+_converting_users: set[int] = set()  # cegah konversi dobel per user
+
+
+async def pdf_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await _handle_conversion(update, context, "pdf")
+
+
+async def word_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await _handle_conversion(update, context, "word")
+
+
+async def convert_caption(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Tangkap perintah /pdf atau /word yang ditulis sebagai caption dokumen."""
+    message = update.message
+    caption = (message.caption or "").split()
+    if not caption:
+        return
+    command = caption[0].split("@", 1)[0].lstrip("/")
+    if command in CONVERT_HELP:
+        await _handle_conversion(update, context, command)
+
+
+async def _handle_conversion(update: Update, context: ContextTypes.DEFAULT_TYPE, command: str) -> None:
+    message = update.message
+    if not message:
+        return
+    user = update.effective_user
+
+    # Sumber file: balasan ke dokumen, atau dokumen yang membawa caption perintah
+    source = None
+    if message.reply_to_message and message.reply_to_message.document:
+        source = message.reply_to_message
+    elif message.document:
+        source = message
+    if source is None:
+        await message.reply_text(CONVERT_HELP[command])
+        return
+
+    document = source.document
+    file_name = document.file_name or ""
+    try:
+        ext = validate_document(file_name, document.mime_type, document.file_size, command)
+    except ConversionError as e:
+        await message.reply_text(str(e))
+        return
+
+    if user.id in _converting_users:
+        await message.reply_text("Konversi kamu yang sebelumnya masih diproses. Tunggu sebentar ya.")
+        return
+
+    _converting_users.add(user.id)
+    status_msg = await message.reply_text("Mengonversi dokumen kamu...")
+    tmp_dir = None
+    try:
+        tmp_dir = tempfile.mkdtemp(prefix="convert_", dir=DOWNLOAD_DIR)
+        src_path = os.path.join(tmp_dir, "source" + ext)
+        await _download_document(context, document, src_path, user.id)
+
+        # Validasi ulang ukuran aktual (bisa berbeda dari file_size di metadata)
+        actual_size = os.path.getsize(src_path)
+        if actual_size <= 0:
+            raise ConversionError("File-nya kosong, tidak bisa dikonversi.")
+        if actual_size > CONVERT_MAX_FILE_SIZE:
+            limit = CONVERT_MAX_FILE_SIZE / (1024 * 1024)
+            raise ConversionError(f"Ukuran file melebihi batas {limit:g} MB.")
+
+        stem = sanitize_filename(os.path.splitext(os.path.basename(file_name))[0]) or "converted"
+        out_name = stem + (".docx" if command == "pdf" else ".pdf")
+        out_path = os.path.join(tmp_dir, out_name)
+
+        note = None
+        if command == "pdf":
+            has_text = inspect_pdf(src_path)
+            await convert_pdf_to_word(src_path, out_path)
+            if not has_text:
+                note = (
+                    "Catatan: PDF ini berupa halaman scan/gambar tanpa teks, "
+                    "jadi isi Word-nya mungkin tidak terbaca (perlu OCR)."
+                )
+        else:
+            inspect_word(src_path, ext)
+            await convert_word_to_pdf(src_path, out_path, document.mime_type)
+
+        caption = ILOVEPDF_CREDIT if command == "word" else note
+        await _edit_status(status_msg, "Mengirim hasil konversi...")
+        with open(out_path, "rb") as fh:
+            await message.reply_document(
+                document=fh, filename=out_name, caption=caption,
+                read_timeout=120, write_timeout=120,
+            )
+        try:
+            await status_msg.delete()
+        except Exception:
+            pass  # gagal hapus pesan status tidak menggagalkan konversi
+        logger.info("Conversion %s completed for user %s", command, user.id)
+
+    except ConversionError as e:
+        logger.warning("Conversion %s failed for user %s: %s", command, user.id, e)
+        await _edit_status(status_msg, f"Gagal: {e}")
+    except Exception:
+        logger.exception("Unexpected conversion error for user %s", user.id)
+        await _edit_status(status_msg, "Terjadi kesalahan tak terduga. Silakan coba lagi nanti.")
+    finally:
+        _converting_users.discard(user.id)
+        if tmp_dir:
+            shutil.rmtree(tmp_dir, ignore_errors=True)  # bersih walau konversi gagal
+
+
+async def _download_document(context, document, dest_path: str, user_id: int) -> None:
+    """Unduh dokumen dari Telegram; gagal di sini bukan berarti file rusak."""
+    try:
+        tg_file = await context.bot.get_file(document.file_id)
+        await tg_file.download_to_drive(dest_path)
+    except Exception:
+        logger.warning("Document download failed for user %s", user_id)
+        raise ConversionError("Gagal mengunduh dokumen dari Telegram. Coba kirim ulang file-nya.")
+
+
+async def _edit_status(status_msg, text: str) -> None:
+    try:
+        await status_msg.edit_text(text)
+    except Exception:
+        pass  # pesan status bisa saja sudah terhapus
 
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -268,6 +428,15 @@ def main() -> None:
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("anime", anime))
     app.add_handler(CommandHandler("restart", restart_bot))
+    app.add_handler(CommandHandler("pdf", pdf_command))
+    app.add_handler(CommandHandler("word", word_command))
+    # Perintah yang ditulis sebagai caption pada dokumen yang diunggah
+    app.add_handler(
+        MessageHandler(
+            filters.Document.ALL & filters.CaptionRegex(r"^/(pdf|word)(?:@\w+)?(?:\s|$)"),
+            convert_caption,
+        )
+    )
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.add_error_handler(error_handler)
 

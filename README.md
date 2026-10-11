@@ -9,6 +9,8 @@ A Telegram bot that downloads TikTok, Instagram & Pinterest videos and photo pos
 - Downloads Instagram reels/posts via `yt-dlp`, with `instaloader` and `og:image` fallbacks (full-resolution photos); optional `cookies.txt` for login-required posts
 - Downloads Pinterest pins at highest quality (`/originals/` upgrade); large photos are sent as documents to avoid Telegram recompression
 - `/anime {title}` — searches MyAnimeList and shows the cover image, episodes, status, score, and full synopsis in one message
+- `/pdf` — converts an uploaded PDF into an editable Word `.docx` (reply to the document, or send the PDF with `/pdf` as caption)
+- `/word` — converts an uploaded Word `.docx`/`.doc` into a PDF (reply to the document, or send it with `/word` as caption)
 - `/restart` — restart the bot service (admin only, requires a passwordless sudo rule)
 - Sends status updates with a live progress bar while processing
 - Per-user rate limiting
@@ -19,6 +21,8 @@ A Telegram bot that downloads TikTok, Instagram & Pinterest videos and photo pos
 ## Commands
 - `/start` — welcome message
 - `/anime {judul}` — search anime info on MyAnimeList
+- `/pdf` — convert the replied PDF document to `.docx`
+- `/word` — convert the replied Word document to `.pdf`
 - `/restart` — restart the service (only for `ADMIN_ID`)
 
 ## Tech Stack
@@ -28,13 +32,17 @@ A Telegram bot that downloads TikTok, Instagram & Pinterest videos and photo pos
 - instaloader
 - httpx
 - python-dotenv
+- pdf2docx + PyMuPDF (offline PDF → Word)
+- PyJWT (iLovePDF API authentication)
 
 ## File Structure
 - `bot.py` — Telegram bot handlers and entry point
 - `downloader.py` — yt-dlp wrapper + custom scrapers (TikTok photos, Instagram, Pinterest)
 - `mal.py` — MyAnimeList scraper for `/anime`
+- `converter.py` — document conversion (`/pdf` locally, `/word` through the iLovePDF API)
 - `config.py` — loads environment variables
 - `utils.py` — URL validation, filename sanitization, rate limiter, progress reporter
+- `test_conversion.py` — automated tests for the conversion feature
 - `requirements.txt` — Python dependencies
 - `.env.example` — environment variable template
 
@@ -47,6 +55,62 @@ A Telegram bot that downloads TikTok, Instagram & Pinterest videos and photo pos
 | `DOWNLOAD_DIR` | Temp download directory (default `/tmp/tiktok_bot`) |
 | `MAX_FILE_SIZE` | Max media size in bytes (default 50MB — Telegram bot limit) |
 | `RATE_LIMIT_COUNT` / `RATE_LIMIT_WINDOW` | Rate limit per user |
+| `ILOVEPDF_PUBLIC_KEY` / `ILOVEPDF_SECRET_KEY` | iLovePDF API keys — required for `/word` (empty by default, `/pdf` works without them) |
+| `ILOVEPDF_REGION` | Optional processing region: `eu`, `us`, `fr`, `de`, `pl`, `in`, `sg` |
+| `CONVERT_MAX_FILE_SIZE` | Max document size for conversion (default 20MB — Telegram `getFile` limit) |
+| `CONVERT_TIMEOUT` | Per-request conversion timeout in seconds (default 120) |
+| `CONVERT_MAX_CONCURRENT` | How many conversions may run at the same time (default 2) |
+
+## Document Conversion (`/pdf` and `/word`)
+
+Send a document to the bot, then reply to it with the command (or attach the document with the command as caption).
+
+| Command | Input | Output | Engine |
+| --- | --- | --- | --- |
+| `/pdf` | `.pdf` | `.docx` | `pdf2docx`, runs locally on the server |
+| `/word` | `.docx` / `.doc` | `.pdf` | iLovePDF REST API, tool `officepdf` |
+
+**Workflow:** validate file (extension, MIME type, size) → download it to a temp folder →
+convert → reply with the result → delete the temp folder in a `finally` block (also on failure).
+A `Mengonversi dokumen kamu...` status message is sent first and removed afterwards.
+Duplicate commands from a user with a conversion still running are ignored, and at most
+`CONVERT_MAX_CONCURRENT` conversions run at once.
+
+### iLovePDF setup (required for `/word`)
+1. Create a free account at <https://developer.ilovepdf.com/signup>.
+2. Open <https://developer.ilovepdf.com/user/projects>, create a project and copy its
+   **Public Key** and **Secret Key**.
+3. Put them in `.env` (never commit `.env` — it is already in `.gitignore`):
+   ```bash
+   ILOVEPDF_PUBLIC_KEY=xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
+   ILOVEPDF_SECRET_KEY=xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
+   ```
+4. Restart the bot.
+
+Notes on quota and pricing:
+- The free developer plan includes **250 files per month**; paid plans add more credits
+  (<https://developer.ilovepdf.com/pricing>). One conversion = one file/credit.
+- The Secret Key is only used to self-sign a short-lived JWT inside the bot. It is never
+  logged and never leaves the server.
+- Files are uploaded to iLovePDF's servers over SSL, and the bot also calls
+  `DELETE /v1/task/{task}` after every conversion. iLovePDF additionally removes
+  unprocessed files automatically after 1–2 hours.
+- `/pdf` does **not** need any API key.
+
+### Limitations (honest notes)
+- The official iLovePDF REST API **does not offer a PDF → Word tool** (only Word/Excel/PPT → PDF
+  via `officepdf`, plus PDF → JPG, PDF → Markdown, OCR, etc.). `/pdf` therefore runs locally with
+  the open-source `pdf2docx` library instead of calling iLovePDF. No private/undocumented
+  iLovePDF endpoint is scraped.
+- PDF → Word keeps the layout only *approximately*. Text-based PDFs convert well; **scanned
+  PDFs contain no extractable text**, so the resulting Word file may mostly contain images.
+  In that case run OCR first (e.g. iLovePDF's `pdfocr` tool or `ocrmypdf`) — the bot warns you
+  when it detects such a PDF.
+- Legacy `.doc` input is accepted but validated by iLovePDF; `.docx` is recommended.
+- Word → PDF needs working API keys, a reachable network and iLovePDF quota; without them the
+  bot replies with a short setup hint instead of failing silently.
+- Attribution: word → PDF conversion is powered by **iLovePDF** and is credited in the result
+  caption and in `/start`. Usage follows the iLovePDF API terms.
 
 ## Installation (clean Ubuntu Server)
 
@@ -59,11 +123,14 @@ cd telegram-bot
 
 python3 -m venv venv
 source venv/bin/activate
-pip install -r requirements.txt
+pip install -r requirements.txt   # also installs pdf2docx, PyMuPDF and PyJWT for /pdf and /word
 
 cp .env.example .env
-nano .env   # fill in your BOT_TOKEN
+nano .env   # fill in your BOT_TOKEN (and ILOVEPDF keys to enable /word)
 ```
+
+No extra system packages are needed for the conversion feature — `pdf2docx` and `PyMuPDF`
+ship as wheels. `ffmpeg` stays required for video downloads.
 
 ## Running Manually
 
@@ -121,8 +188,25 @@ sudo visudo -f /etc/sudoers.d/telegram-bot
 zeydann ALL=(ALL) NOPASSWD: /usr/bin/systemctl restart telegram-bot
 ```
 
+## Tests
+
+```bash
+source venv/bin/activate
+python test_conversion.py
+```
+
+The suite covers: valid PDF → DOCX conversion, Word → PDF through a mocked iLovePDF API,
+commands sent without a document (reply and caption), unsupported file types, corrupted /
+password-protected / empty files, the file-size limit, iLovePDF HTTP errors (401/400/429/5xx)
+and timeouts, temp-file cleanup after both successful and failed conversions, concurrent users,
+duplicate commands, secret-key hygiene in logs, and Telegram handler routing.
+
 ## Troubleshooting
 - **Download fails for most video links**: update yt-dlp (`pip install -U yt-dlp`) — TikTok frequently changes its site structure.
 - **Photo/slideshow posts fail to parse**: TikTok occasionally changes the internal JSON structure of its pages. Check `_scrape_photo_post` in `downloader.py` and adjust the key path if needed.
 - **Video sends fail but download succeeds**: check `MAX_FILE_SIZE` against Telegram's bot upload limit (50MB for bots without a local Bot API server).
 - **Bot doesn't respond at all**: verify `BOT_TOKEN` is correct and the service is running (`systemctl status telegram-bot`).
+- **`/word` replies "Konversi Word → PDF belum aktif"**: `ILOVEPDF_PUBLIC_KEY` / `ILOVEPDF_SECRET_KEY` are missing in `.env` — see [Document Conversion](#document-conversion-pdf-and-word).
+- **`/word` replies about invalid API keys or quota**: check the key pair at <https://developer.ilovepdf.com/user/projects> and your remaining credits.
+- **`/word` replies "melebihi batas waktu"**: raise `CONVERT_TIMEOUT` in `.env` (large documents take longer).
+- **Converted `.docx` looks empty**: the PDF is a scan without a text layer — OCR it first (see Limitations).
