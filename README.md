@@ -3,30 +3,50 @@
 A Telegram bot that downloads TikTok, Instagram & Pinterest videos and photo posts (without watermark, when supported by the source) and sends them back to the user. Built to be extensible for other platforms in the future.
 
 ## Features
-- Validates TikTok and Instagram URLs (including TikTok short links `vt.tiktok.com` / `vm.tiktok.com`)
+- Validates TikTok, Instagram, and Pinterest URLs (including TikTok short links `vt.tiktok.com` / `vm.tiktok.com`)
 - Downloads video posts via `yt-dlp`
 - Downloads photo/slideshow posts via a custom scraper fallback (mobile User-Agent, since `yt-dlp` doesn't support TikTok photo posts)
-- Downloads Instagram reels/posts via `yt-dlp` (public posts only; private posts require cookies)
-- Sends status updates while processing
+- Downloads Instagram reels/posts via `yt-dlp`, with `instaloader` and `og:image` fallbacks (full-resolution photos); optional `cookies.txt` for login-required posts
+- Downloads Pinterest pins at highest quality (`/originals/` upgrade); large photos are sent as documents to avoid Telegram recompression
+- `/anime {title}` — searches MyAnimeList and shows the cover image, episodes, status, score, and full synopsis in one message
+- `/restart` — restart the bot service (admin only, requires a passwordless sudo rule)
+- Sends status updates with a live progress bar while processing
 - Per-user rate limiting
 - Automatic cleanup of temporary files
 - Runs as a systemd service with auto-restart
 - Only responds to messages containing a link (stays silent on regular chat)
 
+## Commands
+- `/start` — welcome message
+- `/anime {judul}` — search anime info on MyAnimeList
+- `/restart` — restart the service (only for `ADMIN_ID`)
+
 ## Tech Stack
 - Python 3.11+
 - python-telegram-bot
 - yt-dlp
+- instaloader
 - httpx
 - python-dotenv
 
 ## File Structure
 - `bot.py` — Telegram bot handlers and entry point
-- `downloader.py` — yt-dlp wrapper + custom photo-post scraper fallback
+- `downloader.py` — yt-dlp wrapper + custom scrapers (TikTok photos, Instagram, Pinterest)
+- `mal.py` — MyAnimeList scraper for `/anime`
 - `config.py` — loads environment variables
-- `utils.py` — URL validation, filename sanitization, rate limiter
+- `utils.py` — URL validation, filename sanitization, rate limiter, progress reporter
 - `requirements.txt` — Python dependencies
 - `.env.example` — environment variable template
+
+## Environment Variables (`.env`)
+| Key | Description |
+| --- | --- |
+| `BOT_TOKEN` | Token from @BotFather (required) |
+| `ADMIN_ID` | Telegram user ID allowed to use `/restart` |
+| `INSTAGRAM_COOKIEFILE` | Optional path to Instagram `cookies.txt` (for login-required posts) |
+| `DOWNLOAD_DIR` | Temp download directory (default `/tmp/tiktok_bot`) |
+| `MAX_FILE_SIZE` | Max media size in bytes (default 50MB — Telegram bot limit) |
+| `RATE_LIMIT_COUNT` / `RATE_LIMIT_WINDOW` | Rate limit per user |
 
 ## Installation (clean Ubuntu Server)
 
@@ -90,6 +110,15 @@ sudo journalctl -u telegram-bot -f
 ```bash
 sudo systemctl restart telegram-bot
 sudo systemctl stop telegram-bot
+```
+
+### `/restart` from Telegram (passwordless sudo)
+The bot can restart itself via `/restart`. Allow it without a password:
+```bash
+sudo visudo -f /etc/sudoers.d/telegram-bot
+```
+```
+zeydann ALL=(ALL) NOPASSWD: /usr/bin/systemctl restart telegram-bot
 ```
 
 ## Troubleshooting
