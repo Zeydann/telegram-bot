@@ -142,6 +142,12 @@ def _build_caption(author: str | None, description: str | None) -> str:
     return "\n".join(lines)
 
 async def _send_image_group(message, files: list[str], caption: str) -> None:
+    # Foto > 9MB tidak bisa dikirim sebagai photo (limit Telegram 10MB, dan
+    # Telegram bisa recompress foto) — kirim sebagai document agar kualitas HD utuh.
+    if any(os.path.getsize(f) > 9 * 1024 * 1024 for f in files):
+        await _send_as_documents(message, files, caption)
+        return
+
     batches = [files[i:i + MAX_MEDIA_GROUP] for i in range(0, len(files), MAX_MEDIA_GROUP)]
     opened_files = []
     try:
@@ -161,6 +167,18 @@ async def _send_image_group(message, files: list[str], caption: str) -> None:
                 f.close()
             except Exception:
                 pass
+
+
+async def _send_as_documents(message, files: list[str], caption: str) -> None:
+    """Kirim file apa adanya (tanpa kompresi Telegram) — kualitas tetap HD."""
+    for i, path in enumerate(files):
+        cap = caption if i == 0 else None
+        with open(path, "rb") as f:
+            await message.reply_document(
+                document=f, filename=os.path.basename(path),
+                caption=cap, parse_mode="HTML" if cap else None,
+                read_timeout=180, write_timeout=180, connect_timeout=30,
+            )
 
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:

@@ -642,9 +642,6 @@ async def download_pinterest(url: str, progress_callback=None) -> DownloadResult
         info = await loop.run_in_executor(None, _run_ytdlp, url, job_dir, hook)
     except yt_dlp.utils.DownloadError as e:
         msg = str(e).lower()
-        if "not available" in msg or "removed" in msg or "404" in msg:
-            cleanup_job(job_dir)
-            raise DownloadError("Pin Pinterest sudah dihapus atau tidak ditemukan.")
         if "rate" in msg or "429" in msg:
             cleanup_job(job_dir)
             raise DownloadError("Pinterest sedang membatasi request. Coba lagi beberapa saat lagi.")
@@ -654,10 +651,14 @@ async def download_pinterest(url: str, progress_callback=None) -> DownloadResult
             return await _scrape_pinterest(url, job_dir, progress_callback)
         except DownloadError:
             cleanup_job(job_dir)
+            if "not available" in msg or "removed" in msg or "404" in msg:
+                raise DownloadError("Pin Pinterest sudah dihapus atau tidak ditemukan.")
             raise
         except Exception:
             cleanup_job(job_dir)
             logger.exception("Pinterest scrape fallback failed for %s", url)
+            if "not available" in msg or "removed" in msg or "404" in msg:
+                raise DownloadError("Pin Pinterest sudah dihapus atau tidak ditemukan.")
             raise DownloadError("Gagal mengambil media dari link Pinterest tersebut.")
     except Exception:
         cleanup_job(job_dir)
