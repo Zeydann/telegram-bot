@@ -48,7 +48,52 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "Send me a TikTok or Instagram link and I'll download the media for you.\n\n"
         "Document converters:\n"
         "/pdf — reply to a PDF to get a .docx\n"
-        "/word — reply to a Word file to get a PDF (Word → PDF conversion powered by iLovePDF)"
+        "/word — reply to a Word file to get a PDF (Word → PDF conversion powered by iLovePDF)\n\n"
+        "/feature — see all available features"
+    )
+
+
+# Daftar fitur untuk /feature. Setiap entri harus sesuai handler yang benar-benar
+# terdaftar di main() — cukup tambahkan baris di sini saat ada fitur baru.
+# Struktur: (kategori, emoji, ((nama, deskripsi, command atau None), ...))
+FEATURES = (
+    ("Media Downloader", "📥", (
+        ("TikTok Downloader", "Download video atau foto TikTok dari link yang dikirim ke bot.", None),
+        ("Instagram Downloader", "Download reels dan foto Instagram dari link.", None),
+        ("Pinterest Downloader", "Download video atau foto Pinterest kualitas tertinggi.", None),
+    )),
+    ("Info Anime", "🎌", (
+        ("Anime Search", "Cari info anime di MyAnimeList beserta sinopsisnya.", "/anime"),
+    )),
+    ("Dokumen", "📄", (
+        ("PDF to Word", "Konversi file PDF menjadi dokumen Word (.docx).", "/pdf"),
+        ("Word to PDF", "Konversi dokumen Word (.docx) menjadi file PDF.", "/word"),
+    )),
+    ("Lainnya", "⚙️", (
+        ("Welcome", "Pesan sambutan dan petunjuk singkat bot.", "/start"),
+        ("Feature List", "Tampilkan daftar fitur bot ini.", "/feature"),
+        ("Restart", "Restart layanan bot (khusus admin).", "/restart"),
+    )),
+)
+
+
+def _build_feature_text() -> str:
+    """Susun pesan /feature dalam HTML; semua teks di-escape agar aman dari parse error."""
+    lines = ["<b>✨ FITUR BOT</b>", "", "Berikut fitur yang tersedia di bot ini:"]
+    for category, emoji, items in FEATURES:
+        lines += ["", f"<b>{emoji} {html_lib.escape(category)}</b>"]
+        for name, description, command in items:
+            line = f"• <b>{html_lib.escape(name)}</b> — {html_lib.escape(description)}"
+            if command:
+                line += f" <code>{html_lib.escape(command)}</code>"
+            lines.append(line)
+    lines += ["", "<i>Gunakan bot dengan mudah melalui command yang tersedia.</i>"]
+    return "\n".join(lines)
+
+
+async def feature(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await update.message.reply_text(
+        _build_feature_text(), parse_mode="HTML", disable_web_page_preview=True
     )
 
 
@@ -426,6 +471,7 @@ def main() -> None:
     app = Application.builder().token(BOT_TOKEN).request(request).post_init(_on_startup).build()
 
     app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("feature", feature))
     app.add_handler(CommandHandler("anime", anime))
     app.add_handler(CommandHandler("restart", restart_bot))
     app.add_handler(CommandHandler("pdf", pdf_command))

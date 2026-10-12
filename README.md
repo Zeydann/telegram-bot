@@ -11,6 +11,7 @@ A Telegram bot that downloads TikTok, Instagram & Pinterest videos and photo pos
 - `/anime {title}` — searches MyAnimeList and shows the cover image, episodes, status, score, and full synopsis in one message
 - `/pdf` — converts an uploaded PDF into an editable Word `.docx` (reply to the document, or send the PDF with `/pdf` as caption)
 - `/word` — converts an uploaded Word `.docx`/`.doc` into a PDF (reply to the document, or send it with `/word` as caption)
+- `/feature` — lists every feature that is actually implemented in the bot, grouped by category
 - `/restart` — restart the bot service (admin only, requires a passwordless sudo rule)
 - Sends status updates with a live progress bar while processing
 - Per-user rate limiting
@@ -23,6 +24,7 @@ A Telegram bot that downloads TikTok, Instagram & Pinterest videos and photo pos
 - `/anime {judul}` — search anime info on MyAnimeList
 - `/pdf` — convert the replied PDF document to `.docx`
 - `/word` — convert the replied Word document to `.pdf`
+- `/feature` — show the list of available features
 - `/restart` — restart the service (only for `ADMIN_ID`)
 
 ## Tech Stack
