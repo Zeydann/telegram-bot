@@ -9,9 +9,11 @@ A Telegram bot that downloads TikTok, Instagram & Pinterest videos and photo pos
 - Downloads Instagram reels/posts via `yt-dlp`, with `instaloader` and `og:image` fallbacks (full-resolution photos); optional `cookies.txt` for login-required posts
 - Downloads Pinterest pins at highest quality (`/originals/` upgrade); large photos are sent as documents to avoid Telegram recompression
 - `/anime {title}` — searches MyAnimeList and shows the cover image, episodes, status, score, and full synopsis in one message
+- `/manga`, `/manhwa`, `/comic`, `/chapter`, `/read`, `/mangainfo` — Indonesian-language manga & manhwa search and reading via the official MangaDex API (Indonesian chapters only, never an English fallback)
 - `/pdf` — converts an uploaded PDF into an editable Word `.docx` (reply to the document, or send the PDF with `/pdf` as caption)
 - `/word` — converts an uploaded Word `.docx`/`.doc` into a PDF (reply to the document, or send it with `/word` as caption)
 - `/feature` — lists every feature that is actually implemented in the bot, grouped by category
+- `/mangafeature` — lists the manga & manhwa commands
 - `/restart` — restart the bot service (admin only, requires a passwordless sudo rule)
 - Sends status updates with a live progress bar while processing
 - Per-user rate limiting
@@ -22,6 +24,13 @@ A Telegram bot that downloads TikTok, Instagram & Pinterest videos and photo pos
 ## Commands
 - `/start` — welcome message
 - `/anime {judul}` — search anime info on MyAnimeList
+- `/manga {judul}` — search Japanese manga with Indonesian translations
+- `/manhwa {judul}` — search Korean manhwa/webtoons with Indonesian translations
+- `/comic {judul}` — search both manga and manhwa
+- `/chapter {judul}` — list the available Indonesian chapters
+- `/read {judul} {chapter}` — read an Indonesian chapter
+- `/mangainfo {judul}` — detailed information about a title
+- `/mangafeature` — show the manga & manhwa command list
 - `/pdf` — convert the replied PDF document to `.docx`
 - `/word` — convert the replied Word document to `.pdf`
 - `/feature` — show the list of available features
@@ -36,15 +45,20 @@ A Telegram bot that downloads TikTok, Instagram & Pinterest videos and photo pos
 - python-dotenv
 - pdf2docx + PyMuPDF (offline PDF → Word)
 - PyJWT (iLovePDF API authentication)
+- MangaDex API (public, no key required — manga/manhwa feature)
 
 ## File Structure
 - `bot.py` — Telegram bot handlers and entry point
 - `downloader.py` — yt-dlp wrapper + custom scrapers (TikTok photos, Instagram, Pinterest)
 - `mal.py` — MyAnimeList scraper for `/anime`
+- `manga.py` — manga/manhwa command handlers, inline keyboards and callback routing
+- `mangadex.py` — MangaDex API provider (search, Indonesian chapter feeds, pages)
 - `converter.py` — document conversion (`/pdf` locally, `/word` through the iLovePDF API)
 - `config.py` — loads environment variables
 - `utils.py` — URL validation, filename sanitization, rate limiter, progress reporter
 - `test_conversion.py` — automated tests for the conversion feature
+- `test_feature.py` — automated tests for the `/feature` command
+- `test_manga.py` — automated tests for the manga/manhwa feature (no network needed)
 - `requirements.txt` — Python dependencies
 - `.env.example` — environment variable template
 
@@ -113,6 +127,50 @@ Notes on quota and pricing:
   bot replies with a short setup hint instead of failing silently.
 - Attribution: word → PDF conversion is powered by **iLovePDF** and is credited in the result
   caption and in `/start`. Usage follows the iLovePDF API terms.
+
+## Manga & Manhwa (Bahasa Indonesia)
+
+Commands: `/manga`, `/manhwa`, `/comic`, `/chapter`, `/read`, `/mangainfo`,
+`/mangafeature` (also listed under `/feature`).
+
+**Data source:** the official, public **MangaDex API** (`https://api.mangadex.org`,
+docs at <https://api.mangadex.org/docs/>). No API key is required, but MangaDex's
+Acceptable Usage Policy applies and is respected here:
+
+- every result credits MangaDex (`Source: MangaDex` + website + API docs) and shows the
+  scanlation group name when reading is offered,
+- no ads and no paid access are built on top of the API,
+- chapter images are streamed from MangaDex@Home for the requesting user only — nothing
+  is re-hosted or redistributed by this bot, and every chapter offers an
+  `Open Source` button linking to the original reading page,
+- when a chapter has no hosted pages (e.g. externally hosted/official chapters), the bot
+  sends the original link instead of images — it never bypasses access controls,
+- results are restricted to `safe`/`suggestive` content ratings.
+
+**Indonesian-only guarantee:** every chapter query passes MangaDex's
+`translatedLanguage[]=id` filter and the response is filtered again client-side.
+A title is only shown when the feed confirms Indonesian chapters exist — the bot
+never falls back to English chapters, and says so explicitly when a title has no
+Indonesian release ("Tidak ada chapter Bahasa Indonesia yang tersedia...").
+Title categories (manga vs manhwa) come from the `originalLanguage` metadata
+(`ja` → manga, `ko` → manhwa), never from the title text.
+
+**Rate limiting & caching:** requests are throttled to ~4/s (below MangaDex's 5/s
+limit), `429` responses honor `Retry-After`, and search/details/chapter lists are
+cached in-memory (5–10 minutes) to avoid repeat lookups.
+
+**Honest limitations:**
+
+- MangaDex does not carry every Indonesian scanlation. Popular manhwa in particular
+  often have **zero** Indonesian chapters on MangaDex (e.g. Solo Leveling) — the bot
+  reports that accurately instead of substituting English chapters.
+- For very long series the chapter list is fetched up to 1,500 entries; if a title has
+  more, the list is marked "daftar terpotong" (truncated) rather than pretending to be
+  complete.
+- Cover images are served from `uploads.mangadex.org`; if that CDN is unreachable the
+  bot falls back to a text result with all metadata and links.
+- Other Indonesian catalog providers were evaluated (e.g. komiku.id-based scrapers);
+  they are unofficial scrapers without permitted access terms, so they are not used.
 
 ## Installation (clean Ubuntu Server)
 
@@ -195,13 +253,23 @@ zeydann ALL=(ALL) NOPASSWD: /usr/bin/systemctl restart telegram-bot
 ```bash
 source venv/bin/activate
 python test_conversion.py
+python test_feature.py
+python test_manga.py
 ```
 
-The suite covers: valid PDF → DOCX conversion, Word → PDF through a mocked iLovePDF API,
+The conversion suite covers: valid PDF → DOCX conversion, Word → PDF through a mocked iLovePDF API,
 commands sent without a document (reply and caption), unsupported file types, corrupted /
 password-protected / empty files, the file-size limit, iLovePDF HTTP errors (401/400/429/5xx)
 and timeouts, temp-file cleanup after both successful and failed conversions, concurrent users,
 duplicate commands, secret-key hygiene in logs, and Telegram handler routing.
+
+The manga suite runs fully offline (provider calls mocked) and covers: Indonesian-only
+language filtering (including mixed-language API responses), category classification from
+`originalLanguage` metadata, skipping titles without Indonesian chapters (no English
+fallback), `/read` argument parsing, release pickers for multiple scanlation groups,
+chapter pagination, inline-button flows (view chapters, info, next results, previous/next
+chapter), expired/invalid/duplicate callbacks, source-error and rate-limit messages,
+HTML escaping, `/feature` registration and handler routing.
 
 ## Troubleshooting
 - **Download fails for most video links**: update yt-dlp (`pip install -U yt-dlp`) — TikTok frequently changes its site structure.

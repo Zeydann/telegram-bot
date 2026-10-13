@@ -15,6 +15,7 @@ from telegram import Update, InputMediaPhoto
 from telegram.request import HTTPXRequest
 from telegram.ext import (
     Application,
+    CallbackQueryHandler,
     CommandHandler,
     MessageHandler,
     ContextTypes,
@@ -30,6 +31,16 @@ from converter import (
     inspect_pdf,
     inspect_word,
     validate_document,
+)
+from manga import (
+    chapter_cmd,
+    comic_cmd,
+    mangafeature_cmd,
+    manga_callback,
+    manga_cmd,
+    mangainfo_cmd,
+    manhwa_cmd,
+    read_cmd,
 )
 
 logging.basicConfig(
@@ -49,7 +60,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "Document converters:\n"
         "/pdf — reply to a PDF to get a .docx\n"
         "/word — reply to a Word file to get a PDF (Word → PDF conversion powered by iLovePDF)\n\n"
-        "/feature — see all available features"
+        "Manga & manhwa (Bahasa Indonesia):\n"
+        "/manga, /manhwa, /comic, /chapter, /read, /mangainfo\n\n"
+        "/feature — see all available features\n"
+        "/mangafeature — see manga & manhwa commands"
     )
 
 
@@ -64,6 +78,15 @@ FEATURES = (
     )),
     ("Info Anime", "🎌", (
         ("Anime Search", "Cari info anime di MyAnimeList beserta sinopsisnya.", "/anime"),
+    )),
+    ("Manga dan Manhwa", "📚", (
+        ("Manga Search", "Cari manga terjemahan Indonesia di MangaDex.", "/manga"),
+        ("Manhwa Search", "Cari manhwa/webtoon terjemahan Indonesia.", "/manhwa"),
+        ("Comic Search", "Cari manga dan manhwa sekaligus.", "/comic"),
+        ("Chapter List", "Lihat daftar chapter Bahasa Indonesia.", "/chapter"),
+        ("Read Chapter", "Baca atau buka chapter Indonesia.", "/read"),
+        ("Manga Info", "Lihat detail judul manga/manhwa.", "/mangainfo"),
+        ("Manga Features", "Daftar command manga dan manhwa.", "/mangafeature"),
     )),
     ("Dokumen", "📄", (
         ("PDF to Word", "Konversi file PDF menjadi dokumen Word (.docx).", "/pdf"),
@@ -476,6 +499,17 @@ def main() -> None:
     app.add_handler(CommandHandler("restart", restart_bot))
     app.add_handler(CommandHandler("pdf", pdf_command))
     app.add_handler(CommandHandler("word", word_command))
+    # Manga & manhwa Indonesia (sumber: MangaDex)
+    app.add_handler(CommandHandler("manga", manga_cmd))
+    app.add_handler(CommandHandler("manhwa", manhwa_cmd))
+    app.add_handler(CommandHandler("comic", comic_cmd))
+    app.add_handler(CommandHandler("chapter", chapter_cmd))
+    app.add_handler(CommandHandler("read", read_cmd))
+    app.add_handler(CommandHandler("mangainfo", mangainfo_cmd))
+    app.add_handler(CommandHandler("mangafeature", mangafeature_cmd))
+    app.add_handler(
+        CallbackQueryHandler(manga_callback, pattern=r"^mg\|")
+    )
     # Perintah yang ditulis sebagai caption pada dokumen yang diunggah
     app.add_handler(
         MessageHandler(
