@@ -13,9 +13,11 @@ Modul ini HANYA memakai endpoint publik yang terdokumentasi, dengan:
   - penanganan 429 (hormati header ``retry-after``) dan error sementara,
   - cache TTL untuk mengurangi jumlah request berulang.
 
-Filter Bahasa Indonesia: setiap daftar chapter selalu diminta dengan parameter
-``translatedLanguage[]=id`` dan hasilnya dicek ulang di sisi klien (kadang API
-mengembalikan campuran). Tidak ada fallback ke bahasa Inggris di modul ini.
+Filter Bahasa: setiap daftar chapter selalu diminta dengan parameter
+``translatedLanguage[]`` dan hasilnya dicek ulang di sisi klien (kadang API
+mengembalikan campuran). Default Bahasa Indonesia (``id``); bahasa Inggris
+(``en``) HANYA dipakai ketika pengguna secara eksplisit memintanya lewat
+tombol penawaran di Telegram — tidak pernah sebagai fallback diam-diam.
 
 Catatan: filter ketersediaan ``availableTranslatedLanguages`` pada objek manga
 TERBUKTI basi (mis. judul yang mencantumkan ``id`` tapi chapter feed-nya nol),
@@ -39,6 +41,7 @@ WEBSITE_URL = "https://mangadex.org/"
 API_DOCS_URL = "https://api.mangadex.org/docs/"
 
 INDONESIAN_LANG = "id"
+ENGLISH_LANG = "en"
 
 HEADERS = {
     "User-Agent": (
@@ -475,20 +478,23 @@ async def search_titles(query: str, category: str | None = None,
     return titles
 
 
-async def indonesian_stats(manga_id: str) -> tuple[int, str | None]:
-    """(jumlah chapter Indonesia, nomor terbaru) — verifikasi via feed.
+async def language_stats(manga_id: str,
+                         lang: str = INDONESIAN_LANG) -> tuple[int, str | None]:
+    """(jumlah chapter berbahasa `lang`, nomor terbaru) — verifikasi via feed.
 
-    Ini SATU-SATUNYA cara yang andal mengetahui ketersediaan chapter
-    Bahasa Indonesia sebuah judul (metadata ``availableTranslatedLanguages``
-    terbukti basi).
+    Ini SATU-SATUNYA cara yang andal mengetahui ketersediaan terjemahan sebuah
+    judul (metadata ``availableTranslatedLanguages`` terbukti basi). Default
+    Bahasa Indonesia; ``ENGLISH_LANG`` hanya dipakai saat pengguna secara
+    eksplisit meminta versi Inggris.
     """
-    cached = _cache_stats.get(manga_id)
+    cache_key = f"{lang}|{manga_id}"
+    cached = _cache_stats.get(cache_key)
     if cached is not None:
         return cached
 
     params = {
         "limit": 1,
-        "translatedLanguage[]": [INDONESIAN_LANG],
+        "translatedLanguage[]": [lang],
         "order[chapter]": "desc",
         "contentRating[]": list(CONTENT_RATING),
     }
@@ -497,26 +503,33 @@ async def indonesian_stats(manga_id: str) -> tuple[int, str | None]:
     latest = None
     for chapter_json in data.get("data") or []:
         attrs = chapter_json.get("attributes") or {}
-        # pertahankan hanya Bahasa Indonesia (defensif terhadap API)
-        if attrs.get("translatedLanguage") != INDONESIAN_LANG:
+        # pertahankan hanya bahasa yang diminta (defensif terhadap API)
+        if attrs.get("translatedLanguage") != lang:
             continue
         latest = attrs.get("chapter")
     result = (total, latest)
-    _cache_stats.set(manga_id, result)
+    _cache_stats.set(cache_key, result)
     return result
 
 
-async def find_titles_with_indonesian(query: str, category: str | None = None,
-                                      max_verify: int = MAX_VERIFY,
-                                      require_category: bool = True,
-                                      max_results: int = MAX_RELATED_TITLES) -> list[Title]:
-    """Cari judul yang punya chapter Bahasa Indonesia (hasil diverifikasi feed).
+async def indonesian_stats(manga_id: str) -> tuple[int, str | None]:
+    """Jumlah chapter Bahasa Indonesia sebuah judul (lihat language_stats)."""
+    return await language_stats(manga_id, INDONESIAN_LANG)
 
-    Setiap kandidat diverifikasi dengan ``translatedLanguage[]=id``; judul
-    tanpa chapter Indonesia dilewati dan TIDAK pernah diganti judul lain
-    berbahasa Inggris.
+
+async def find_titles_with_language(query: str, category: str | None = None,
+                                    lang: str = INDONESIAN_LANG,
+                                    max_verify: int = MAX_VERIFY,
+                                    require_category: bool = True,
+                                    max_results: int = MAX_RELATED_TITLES) -> list[Title]:
+    """Cari judul yang punya chapter berbahasa `lang` (hasil diverifikasi feed).
+
+    Setiap kandidat diverifikasi dengan ``translatedLanguage[]=<lang>``; judul
+    tanpa chapter pada bahasa tersebut dilewati dan TIDAK pernah diganti judul
+    lain. Default Bahasa Indonesia — bahasa Inggris hanya bila diminta
+    eksplisit oleh pengguna.
     """
-    cache_key = f"find|{query}|{category or '*'}"
+    cache_key = f"find|{lang}|{query}|{category or '*'}"
     cached = _cache_search.get(cache_key)
     if cached is not None:
         return cached
@@ -530,7 +543,7 @@ async def find_titles_with_indonesian(query: str, category: str | None = None,
         if require_category and category and title.category != category:
             continue
         verified += 1
-        total, latest = await indonesian_stats(title.id)
+        total, latest = await language_stats(title.id, lang)
         if total <= 0:
             continue
         title.id_chapter_count = total
@@ -539,6 +552,12 @@ async def find_titles_with_indonesian(query: str, category: str | None = None,
 
     _cache_search.set(cache_key, found)
     return found
+
+
+async def find_titles_with_indonesian(query: str, category: str | None = None,
+                                      **kwargs) -> list[Title]:
+    """Cari judul dengan chapter Bahasa Indonesia (lihat find_titles_with_language)."""
+    return await find_titles_with_language(query, category, INDONESIAN_LANG, **kwargs)
 
 
 async def get_manga(manga_id: str) -> Title:
@@ -555,14 +574,15 @@ async def get_manga(manga_id: str) -> Title:
     return title
 
 
-async def get_indonesian_chapters(manga_id: str) -> tuple[list[Chapter], bool]:
-    """Seluruh chapter Bahasa Indonesia untuk satu judul, urut baca.
+async def get_chapters(manga_id: str,
+                       lang: str = INDONESIAN_LANG) -> tuple[list[Chapter], bool]:
+    """Seluruh chapter berbahasa `lang` untuk satu judul, urut baca.
 
     Mengambil maksimal ``MAX_FEED_PAGES`` x ``FEED_LIMIT`` chapter; bila
     lebih, daftar dianggap terpotong (flag kedua pada tuple). Hanya chapter
-    dengan ``translatedLanguage == "id"`` yang dipertahankan.
+    dengan ``translatedLanguage`` sesuai `lang` yang dipertahankan.
     """
-    cache_key = f"chapters|{manga_id}"
+    cache_key = f"chapters|{lang}|{manga_id}"
     cached = _cache_chapters.get(cache_key)
     if cached is not None:
         return cached
@@ -573,7 +593,7 @@ async def get_indonesian_chapters(manga_id: str) -> tuple[list[Chapter], bool]:
         params = {
             "limit": FEED_LIMIT,
             "offset": page * FEED_LIMIT,
-            "translatedLanguage[]": [INDONESIAN_LANG],
+            "translatedLanguage[]": [lang],
             "order[chapter]": "asc",
             "includes[]": ["scanlation_group"],
             "contentRating[]": list(CONTENT_RATING),
@@ -582,8 +602,8 @@ async def get_indonesian_chapters(manga_id: str) -> tuple[list[Chapter], bool]:
         batch = data.get("data") or []
         for chapter_json in batch:
             attrs = chapter_json.get("attributes") or {}
-            if attrs.get("translatedLanguage") != INDONESIAN_LANG:
-                continue  # jangan pernah menampilkan chapter non-Indonesia
+            if attrs.get("translatedLanguage") != lang:
+                continue  # jangan pernah menampilkan chapter di luar bahasa diminta
             chapters.append(parse_chapter(chapter_json))
         total = int(data.get("total") or 0)
         if len(batch) < FEED_LIMIT or page * FEED_LIMIT + len(batch) >= total:
@@ -597,11 +617,19 @@ async def get_indonesian_chapters(manga_id: str) -> tuple[list[Chapter], bool]:
     return result
 
 
-async def get_releases(manga_id: str, number: float) -> list[Chapter]:
-    """Rilisan Bahasa Indonesia untuk nomor chapter tertentu (bisa > 1 grup)."""
-    chapters, _truncated = await get_indonesian_chapters(manga_id)
+async def get_indonesian_chapters(manga_id: str) -> tuple[list[Chapter], bool]:
+    """Seluruh chapter Bahasa Indonesia untuk satu judul (lihat get_chapters)."""
+    return await get_chapters(manga_id, INDONESIAN_LANG)
+
+
+async def get_releases(manga_id: str, number: float,
+                       lang: str = INDONESIAN_LANG) -> list[Chapter]:
+    """Rilisan berbahasa `lang` untuk nomor chapter tertentu (bisa > 1 grup)."""
+    chapters, _truncated = await get_chapters(manga_id, lang)
     matches: list[Chapter] = []
     for chapter in chapters:
+        if chapter.language != lang:
+            continue
         try:
             value = float(chapter.number)
         except (TypeError, ValueError):

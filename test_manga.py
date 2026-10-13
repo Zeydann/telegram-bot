@@ -1,4 +1,4 @@
-"""Tests untuk fitur manga & manhwa Bahasa Indonesia.
+"""Tests untuk fitur manga & manhwa (Indonesia-first + penawaran versi Inggris).
 
 Jalankan dengan:
 
@@ -383,18 +383,27 @@ class SearchHandlerTests(unittest.IsolatedAsyncioTestCase):
             await manga.manhwa_cmd(make_update(message), make_context(["Zzz"]))
         self.assertIn('Manhwa "Zzz" tidak ditemukan', last_edit_text(message))
 
-    async def test_no_indonesian_message_when_titles_exist(self):
-        """Judul ada tapi tanpa chapter Indonesia -> pesan jelas, bukan fallback."""
+    async def test_no_indonesian_offers_english_with_buttons(self):
+        """Judul ada tapi tanpa chapter Indonesia -> tawarkan Inggris (belum dicari)."""
         message = FakeMessage(text="/manga Zzz")
+
+        async def must_not_search_english(*args, **kwargs):
+            raise AssertionError("pencarian Inggris tidak boleh jalan tanpa konfirmasi")
+
         with mock.patch.object(manga, "_resolve_titles", async_return([])), \
                 mock.patch.object(mangadex, "search_titles",
-                                  async_return([make_title("x", "Zzz")])):
+                                  async_return([make_title("x", "Zzz")])), \
+                mock.patch.object(mangadex, "find_titles_with_language",
+                                  must_not_search_english):
             await manga.manga_cmd(make_update(message), make_context(["Zzz"]))
 
         text = last_edit_text(message)
         self.assertIn("Tidak ada chapter Bahasa Indonesia", text)
-        self.assertNotIn("English", text)
+        self.assertIn('"Zzz"', text)
         self.assertIn("Source: MangaDex", text)
+        markup = message.edits[-1]["reply_markup"]
+        labels = [btn.text for row in markup.inline_keyboard for btn in row]
+        self.assertEqual(labels, ["Yes, English", "No, Cancel"])
 
     async def test_search_sends_photo_result_with_buttons(self):
         message = FakeMessage(text="/manga One Piece")
@@ -506,10 +515,14 @@ class ChapterListTests(unittest.IsolatedAsyncioTestCase):
     async def test_chapter_list_shows_only_indonesian(self):
         message = FakeMessage(text="/chapter One Piece")
         chapters = [make_chapter("c1", "1"), make_chapter("c2", "2", group="Grup B")]
+
+        async def fake_chapters(manga_id, lang):
+            self.assertEqual(lang, "id")  # daftar chapter selalu Bahasa Indonesia
+            return chapters, False
+
         with mock.patch.object(manga, "_resolve_titles",
                                async_return([make_title()])), \
-                mock.patch.object(mangadex, "get_indonesian_chapters",
-                                  async_return((chapters, False))):
+                mock.patch.object(mangadex, "get_chapters", fake_chapters):
             await manga.chapter_cmd(make_update(message),
                                     make_context(["One", "Piece"]))
 
@@ -526,10 +539,13 @@ class ChapterListTests(unittest.IsolatedAsyncioTestCase):
         message = FakeMessage(text="/chapter One Piece")
         chapters = [make_chapter("c1", "1", group="Grup A"),
                     make_chapter("c1b", "1", group="Grup B")]
+
+        async def fake_chapters(manga_id, lang):
+            return chapters, False
+
         with mock.patch.object(manga, "_resolve_titles",
                                async_return([make_title()])), \
-                mock.patch.object(mangadex, "get_indonesian_chapters",
-                                  async_return((chapters, False))):
+                mock.patch.object(mangadex, "get_chapters", fake_chapters):
             await manga.chapter_cmd(make_update(message),
                                     make_context(["One", "Piece"]))
 
@@ -543,10 +559,13 @@ class ChapterListTests(unittest.IsolatedAsyncioTestCase):
     async def test_chapter_list_pagination(self):
         message = FakeMessage(text="/chapter One Piece")
         chapters = [make_chapter(f"c{i}", str(i)) for i in range(1, 21)]
+
+        async def fake_chapters(manga_id, lang):
+            return chapters, False
+
         with mock.patch.object(manga, "_resolve_titles",
                                async_return([make_title()])), \
-                mock.patch.object(mangadex, "get_indonesian_chapters",
-                                  async_return((chapters, False))):
+                mock.patch.object(mangadex, "get_chapters", fake_chapters):
             await manga.chapter_cmd(make_update(message),
                                     make_context(["One", "Piece"]))
 
@@ -559,10 +578,13 @@ class ChapterListTests(unittest.IsolatedAsyncioTestCase):
     async def test_chapter_list_notes_truncated_listing(self):
         message = FakeMessage(text="/chapter One Piece")
         chapters = [make_chapter("c1", "1")]
+
+        async def fake_chapters(manga_id, lang):
+            return chapters, True
+
         with mock.patch.object(manga, "_resolve_titles",
                                async_return([make_title()])), \
-                mock.patch.object(mangadex, "get_indonesian_chapters",
-                                  async_return((chapters, True))):
+                mock.patch.object(mangadex, "get_chapters", fake_chapters):
             await manga.chapter_cmd(make_update(message),
                                     make_context(["One", "Piece"]))
         self.assertIn("daftar terpotong", last_reply_text(message))
@@ -601,13 +623,15 @@ class ReadAndCallbackTests(unittest.IsolatedAsyncioTestCase):
             seen["query"] = query
             return [make_title()]
 
-        async def fake_releases(manga_id, number):
+        async def fake_releases(manga_id, number, lang):
+            self.assertEqual(lang, "id")  # /read tetap Bahasa Indonesia
             seen["number"] = number
             return [make_chapter("c10", "10")]
 
         sent = {}
 
-        async def fake_pages(message, title, chapter):
+        async def fake_pages(message, title, chapter, lang="id"):
+            self.assertEqual(lang, "id")  # /read tetap Bahasa Indonesia
             sent["chapter"] = chapter.id
 
         with mock.patch.object(manga, "_resolve_titles", fake_resolve), \
@@ -689,14 +713,16 @@ class ReadAndCallbackTests(unittest.IsolatedAsyncioTestCase):
         token = manga._new_session(kind="chapters", title=title)
         query = FakeCallbackQuery(f"mg|g|{token}|10")
 
-        async def fake_chapters(manga_id):
+        async def fake_chapters(manga_id, lang):
+            self.assertEqual(lang, "id")  # sesi tanpa lang = Bahasa Indonesia
             return [releases[0], make_chapter("c0", "9"), releases[1]], False
 
-        with mock.patch.object(mangadex, "get_indonesian_chapters", fake_chapters):
+        with mock.patch.object(mangadex, "get_chapters", fake_chapters):
             await manga.manga_callback(make_callback_update(query), mock.Mock())
 
         last = query.edits[-1]
         self.assertIn("Pilih rilisan chapter 10", last["text"])
+        self.assertIn("Bahasa Indonesia", last["text"])
         labels = [btn.text for row in last["reply_markup"].inline_keyboard
                   for btn in row]
         self.assertEqual(len(labels), 2)
@@ -721,7 +747,7 @@ class ReadAndCallbackTests(unittest.IsolatedAsyncioTestCase):
             sent_groups.append((len(images), caption))
             return True
 
-        async def fake_neighbours(t, number, chapter_id=None):
+        async def fake_neighbours(t, number, chapter_id=None, lang="id"):
             return "9", "11"
 
         with mock.patch.object(mangadex, "get_pages", fake_pages), \
@@ -782,11 +808,222 @@ class ReadAndCallbackTests(unittest.IsolatedAsyncioTestCase):
     async def test_neighbour_numbers(self):
         chapters = [make_chapter("c1", "9"), make_chapter("c2", "10"),
                     make_chapter("c3", "11")]
-        with mock.patch.object(mangadex, "get_indonesian_chapters",
-                               async_return((chapters, False))):
+
+        async def fake_chapters(manga_id, lang):
+            self.assertEqual(lang, "id")
+            return chapters, False
+
+        with mock.patch.object(mangadex, "get_chapters", fake_chapters):
             prev_number, next_number = await manga._neighbour_numbers(
                 make_title(), None, chapter_id="c2")
         self.assertEqual((prev_number, next_number), ("9", "11"))
+
+
+# ---------------------------------------------------------------------------
+# Alur penawaran versi Inggris (hanya setelah konfirmasi)
+# ---------------------------------------------------------------------------
+
+class EnglishFallbackTests(unittest.IsolatedAsyncioTestCase):
+    """Bahasa Inggris hanya tampil setelah tombol "Yes, English" ditekan."""
+
+    async def test_offer_session_created_by_search_command(self):
+        """/manhwa tanpa chapter Indonesia -> sesi penawaran, bukan hasil Inggris."""
+        message = FakeMessage(text="/manhwa Solo Leveling")
+        with mock.patch.object(manga, "_resolve_titles", async_return([])), \
+                mock.patch.object(mangadex, "search_titles",
+                                  async_return([make_title("x", "Solo Leveling",
+                                                           category="manhwa")])):
+            await manga.manhwa_cmd(make_update(message),
+                                   make_context(["Solo", "Leveling"]))
+
+        markup = message.edits[-1]["reply_markup"]
+        callback_data = [btn.callback_data for row in markup.inline_keyboard
+                         for btn in row]
+        self.assertTrue(all(data.startswith("mg|yes|") or data.startswith("mg|no|")
+                            for data in callback_data))
+        token = callback_data[0].split("|")[2]
+        session = manga.SESSIONS[token]
+        self.assertEqual(session["kind"], "langoffer")
+        self.assertEqual(session["query"], "Solo Leveling")
+        self.assertEqual(session["category"], "manhwa")
+        self.assertEqual(session["purpose"], "search")
+
+    async def test_yes_english_searches_and_shows_english_results(self):
+        """Tombol "Yes, English" -> pencarian Inggris dijalankan dan ditampilkan."""
+        title = make_title("x", "Solo Leveling", category="manhwa")
+        token = manga._new_session(kind="langoffer", query="Solo Leveling",
+                                   category="manhwa", purpose="search",
+                                   number=None)
+        query = FakeCallbackQuery(f"mg|yes|{token}")
+        seen = {}
+
+        async def fake_find(query_text, category, lang=None, **kwargs):
+            seen["query"] = query_text
+            seen["category"] = category
+            seen["lang"] = lang
+            return [title]
+
+        with mock.patch.object(mangadex, "find_titles_with_language", fake_find):
+            await manga.manga_callback(make_callback_update(query), mock.Mock())
+
+        self.assertEqual(seen, {"query": "Solo Leveling", "category": "manhwa",
+                                "lang": "en"})
+        last = query.edits[-1]
+        self.assertIn("Solo Leveling", last["text"])
+        self.assertIn("Chapter Inggris: 10", last["text"])
+        labels = [btn.text for row in last["reply_markup"].inline_keyboard
+                  for btn in row]
+        self.assertIn("📖 View Chapters", labels)
+        # sesi hasil Inggris tersimpan dengan bahasa Inggris
+        session_token = last["reply_markup"].inline_keyboard[0][0].callback_data.split("|")[2]
+        self.assertEqual(manga.SESSIONS[session_token]["lang"], "en")
+
+    async def test_english_session_lists_english_chapters(self):
+        """Dari sesi Inggris, daftar chapter memakai feed & label Bahasa Inggris."""
+        title = make_title("x", "Solo Leveling", category="manhwa")
+        token = manga._new_session(kind="search", query="Solo Leveling",
+                                   category="manhwa", titles=[title],
+                                   lang=mangadex.ENGLISH_LANG)
+        chapters = [make_chapter("e1", "1", language="en", group="EN Group"),
+                    make_chapter("e2", "2", language="en", group="EN Group")]
+        query = FakeCallbackQuery(f"mg|c|{token}|0")
+        seen = []
+
+        async def fake_chapters(manga_id, lang):
+            seen.append(lang)
+            return chapters, False
+
+        with mock.patch.object(mangadex, "get_chapters", fake_chapters):
+            await manga.manga_callback(make_callback_update(query), mock.Mock())
+
+        self.assertEqual(seen, ["en"])
+        last = query.edits[-1]
+        self.assertIn("Chapter Inggris — Solo Leveling", last["text"])
+        self.assertIn("Bahasa: Inggris (en)", last["text"])
+        self.assertIn("🇬🇧", last["text"])
+        self.assertIn("Source: MangaDex", last["text"])
+        # tombol rilisan memakai sesi berbahasa Inggris
+        labels = [btn.text for row in last["reply_markup"].inline_keyboard
+                  for btn in row]
+        self.assertTrue(any(label.startswith("📖 Ch.") for label in labels))
+
+    async def test_english_reading_navigation_uses_english_feed(self):
+        """Navigasi baca dari sesi Inggris mencari rilisan di feed Inggris."""
+        title = make_title("x", "Solo Leveling", category="manhwa")
+        chapter = make_chapter("e11", "11", language="en", group="EN Group")
+        token = manga._new_session(kind="reader", title=title,
+                                   lang=mangadex.ENGLISH_LANG)
+        query = FakeCallbackQuery(f"mg|r|{token}|11")
+        seen = {}
+
+        async def fake_releases(manga_id, number, lang):
+            seen["lang"] = lang
+            return [chapter]
+
+        async def fake_read(callback_query, t, number, lang):
+            seen["read_lang"] = lang
+
+        with mock.patch.object(mangadex, "get_releases", fake_releases), \
+                mock.patch.object(manga, "_send_pages_from_callback", fake_read):
+            await manga.manga_callback(make_callback_update(query), mock.Mock())
+
+        self.assertEqual(seen, {"lang": "en", "read_lang": "en"})
+
+    async def test_english_read_offer_reads_confirmed_number(self):
+        """Konfirmasi dari alur /read -> baca nomor itu di bahasa Inggris."""
+        title = make_title("x", "Solo Leveling", category="manhwa")
+        token = manga._new_session(kind="langoffer", query="Solo Leveling",
+                                   category=None, purpose="read", number=5.0)
+        query = FakeCallbackQuery(f"mg|yes|{token}")
+        seen = {}
+
+        async def fake_find(query_text, category, lang=None, **kwargs):
+            self.assertEqual(lang, "en")
+            return [title]
+
+        async def fake_read(callback_query, t, number, lang):
+            seen["number"] = number
+            seen["lang"] = lang
+
+        with mock.patch.object(mangadex, "find_titles_with_language", fake_find), \
+                mock.patch.object(manga, "_start_read_from_callback", fake_read):
+            await manga.manga_callback(make_callback_update(query), mock.Mock())
+
+        self.assertEqual(seen, {"number": 5.0, "lang": "en"})
+
+    async def test_no_cancel_ends_search_without_english(self):
+        """"No, Cancel" -> pencarian batal; feed Inggris tidak pernah disentuh."""
+        token = manga._new_session(kind="langoffer", query="Solo Leveling",
+                                   category=None, purpose="search", number=None)
+        query = FakeCallbackQuery(f"mg|no|{token}")
+        called = []
+
+        async def fake_find(*args, **kwargs):
+            called.append(args)
+            return []
+
+        with mock.patch.object(mangadex, "find_titles_with_language", fake_find):
+            await manga.manga_callback(make_callback_update(query), mock.Mock())
+
+        self.assertEqual(called, [])
+        self.assertIn("dibatalkan", query.edits[-1]["text"])
+        self.assertIsNone(manga.SESSIONS.get(token))
+
+    async def test_offer_consumed_once_then_expired(self):
+        """Sesi penawaran sekali pakai: tekan ulang -> kedaluwarsa, bukan hasil."""
+        token = manga._new_session(kind="langoffer", query="Solo",
+                                   category=None, purpose="search", number=None)
+        query = FakeCallbackQuery(f"mg|yes|{token}")
+        with mock.patch.object(mangadex, "find_titles_with_language",
+                               async_return([])):
+            await manga.manga_callback(make_callback_update(query), mock.Mock())
+        self.assertIsNone(manga.SESSIONS.get(token))
+
+        second_press = FakeCallbackQuery(f"mg|yes|{token}")
+        await manga.manga_callback(make_callback_update(second_press), mock.Mock())
+        self.assertIn("kedaluwarsa", second_press.edits[0]["text"])
+
+    async def test_expired_offer_callback_message(self):
+        query = FakeCallbackQuery("mg|yes|expiredtoken|")
+        await manga.manga_callback(make_callback_update(query), mock.Mock())
+        self.assertIn("kedaluwarsa", query.edits[0]["text"])
+
+    async def test_duplicate_offer_press_is_ignored(self):
+        token = manga._new_session(kind="langoffer", query="Solo",
+                                   category=None, purpose="search", number=None)
+        query = FakeCallbackQuery(f"mg|yes|{token}")
+        with mock.patch.object(manga, "_INFLIGHT", {f"111:{query.data}"}):
+            await manga.manga_callback(make_callback_update(query), mock.Mock())
+        self.assertEqual(query.edits, [])
+        self.assertTrue(any("Masih diproses" in (a or "")
+                            for a in query.answers))
+
+    async def test_confirm_english_but_none_available(self):
+        """Konfirmasi tapi tidak ada rilisan Inggris -> pesan jelas + kredit."""
+        token = manga._new_session(kind="langoffer", query="Solo",
+                                   category=None, purpose="search", number=None)
+        query = FakeCallbackQuery(f"mg|yes|{token}")
+        with mock.patch.object(mangadex, "find_titles_with_language",
+                               async_return([])):
+            await manga.manga_callback(make_callback_update(query), mock.Mock())
+
+        text = query.edits[-1]["text"]
+        self.assertIn("Tidak ada chapter Bahasa Inggris", text)
+        self.assertIn("Source: MangaDex", text)
+
+    async def test_indonesian_results_never_show_offer(self):
+        """Judul dengan chapter Indonesia tetap tanpa tombol penawaran Inggris."""
+        message = FakeMessage(text="/manga One Piece")
+        with mock.patch.object(manga, "_resolve_titles",
+                               async_return([make_title()])):
+            await manga.manga_cmd(make_update(message),
+                                  make_context(["One", "Piece"]))
+
+        photos = [r for r in message.replies if "photo" in r]
+        labels = [btn.text for row in photos[0]["reply_markup"].inline_keyboard
+                  for btn in row]
+        self.assertNotIn("Yes, English", labels)
+        self.assertNotIn("No, Cancel", labels)
 
 
 # ---------------------------------------------------------------------------

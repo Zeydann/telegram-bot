@@ -9,10 +9,13 @@ Perintah yang tersedia:
     /mangainfo <judul>    — detail judul
     /mangafeature         — daftar command
 
-Aturan Bahasa (paling penting): hanya chapter dengan metadata terjemahan
-``id`` (Bahasa Indonesia) yang ditampilkan. Tidak ada fallback ke bahasa
-Inggris — bila judul tidak punya chapter Indonesia, pengguna diberi pesan
-yang jelas. Sumber data: MangaDex (lihat ``mangadex.py``).
+Aturan Bahasa (paling penting): pencarian SELALU dimulai dari chapter dengan
+metadata terjemahan ``id`` (Bahasa Indonesia); chapter Indonesia yang ada
+ditampilkan lebih dulu dan tidak pernah diganti otomatis. Bila judul sama
+sekali tidak punya chapter Indonesia, bot MENAWARKAN versi Bahasa Inggris
+lewat tombol "Yes, English" / "No, Cancel" — chapter Inggris HANYA dicari
+dan ditampilkan setelah pengguna menekan "Yes, English". Sumber data:
+MangaDex (lihat ``mangadex.py``).
 """
 
 import asyncio
@@ -66,6 +69,11 @@ NO_ID_CHAPTERS = (
     "Tidak ada chapter Bahasa Indonesia yang tersedia untuk judul ini. "
     "Coba judul lain atau cek sumber aslinya."
 )
+NO_EN_CHAPTERS = (
+    "Tidak ada chapter Bahasa Inggris yang tersedia untuk judul ini. "
+    "Coba judul lain."
+)
+CANCELLED_ENGLISH = "Pencarian versi Bahasa Inggris dibatalkan."
 CHAPTER_NOT_FOUND = "Chapter tidak ditemukan."
 SOURCE_BUSY = "Sumber sedang tidak dapat diakses. Coba lagi nanti."
 RATE_LIMITED_MSG = "Sumber sedang membatasi request. Coba lagi beberapa saat lagi."
@@ -83,7 +91,8 @@ MANGAFEATURE_HTML = (
     "• <code>/read &lt;judul&gt; &lt;chapter&gt;</code> — Baca atau buka chapter Indonesia.\n"
     "• <code>/mangainfo &lt;judul&gt;</code> — Lihat detail judul.\n"
     "• <code>/mangafeature</code> — Lihat daftar fitur manga dan manhwa.\n\n"
-    "<i>Hanya chapter terjemahan Bahasa Indonesia yang ditampilkan.</i>\n\n"
+    "<i>Utamakan chapter Bahasa Indonesia; versi Inggris hanya ditampilkan "
+    "setelah konfirmasi lewat tombol.</i>\n\n"
     "Source: MangaDex\n"
     "Website: https://mangadex.org/\n"
     "API Documentation: https://api.mangadex.org/docs/"
@@ -101,6 +110,38 @@ def _truncate(text: str, limit: int) -> str:
     if not cut:
         cut = text[: max(limit - 3, 0)]
     return cut + "..."
+
+
+# ---------------------------------------------------------------------------
+# Label bahasa (id selalu default; en HANYA setelah konfirmasi pengguna)
+# ---------------------------------------------------------------------------
+
+LANG_NAMES = {
+    mangadex.INDONESIAN_LANG: "Indonesia",
+    mangadex.ENGLISH_LANG: "Inggris",
+}
+
+LANG_FLAGS = {
+    mangadex.INDONESIAN_LANG: "🇮🇩",
+    mangadex.ENGLISH_LANG: "🇬🇧",
+}
+
+
+def _lang_name(lang: str) -> str:
+    return LANG_NAMES.get(lang, lang)
+
+
+def _lang_flag(lang: str) -> str:
+    return LANG_FLAGS.get(lang, "🌐")
+
+
+def _lang_line(lang: str) -> str:
+    """Baris "Bahasa: Indonesia (id)" / "Bahasa: Inggris (en)"."""
+    return f"Bahasa: {_lang_name(lang)} ({lang})"
+
+
+def _no_chapters_text(lang: str) -> str:
+    return NO_ID_CHAPTERS if lang == mangadex.INDONESIAN_LANG else NO_EN_CHAPTERS
 
 
 # ---------------------------------------------------------------------------
@@ -138,7 +179,8 @@ def _callback(action: str, token: str, extra: str = "") -> str:
 # ---------------------------------------------------------------------------
 
 def _title_caption(title: Title, show_category: bool = False,
-                   budget: int = CAPTION_LIMIT) -> str:
+                   budget: int = CAPTION_LIMIT,
+                   lang: str = mangadex.INDONESIAN_LANG) -> str:
     """Caption ringkas untuk satu hasil pencarian (foto + info + tombol)."""
     head = f"<b>{_escape(title.title)}</b>"
     if show_category and title.category:
@@ -155,7 +197,7 @@ def _title_caption(title: Title, show_category: bool = False,
     lines.append(f"🔤 Bahasa asal: {_escape(title.original_language)}")
     if title.id_chapter_count is not None:
         latest = f" — terbaru: {_escape(title.latest_id_chapter)}" if title.latest_id_chapter else ""
-        lines.append(f"📚 Chapter Indonesia: {title.id_chapter_count}{latest}")
+        lines.append(f"📚 Chapter {_lang_name(lang)}: {title.id_chapter_count}{latest}")
 
     fixed = "\n".join(lines)
     link = f'<a href="{title.url}">Buka di MangaDex</a>'
@@ -180,7 +222,8 @@ def _title_caption(title: Title, show_category: bool = False,
 
 
 def _info_text(title: Title, id_count: int | None, latest: str | None,
-               truncated: bool = False) -> str:
+               truncated: bool = False,
+               lang: str = mangadex.INDONESIAN_LANG) -> str:
     """Pesan detail /mangainfo (limit 4096 karakter)."""
     lines = [f"<b>{_escape(title.title)}</b>"]
     if title.indonesian_title and title.indonesian_title != title.title:
@@ -198,9 +241,9 @@ def _info_text(title: Title, id_count: int | None, latest: str | None,
     if id_count:
         note = " (daftar terpotong)" if truncated else ""
         latest_part = f" — terbaru: {_escape(latest)}" if latest else ""
-        lines.append(f"📚 Chapter Indonesia: {id_count}{latest_part}{note}")
+        lines.append(f"📚 Chapter {_lang_name(lang)}: {id_count}{latest_part}{note}")
     else:
-        lines.append("📚 Chapter Indonesia: tidak tersedia")
+        lines.append(f"📚 Chapter {_lang_name(lang)}: tidak tersedia")
 
     synopsis = title.synopsis_id or title.synopsis
     if synopsis:
@@ -217,8 +260,9 @@ def _info_text(title: Title, id_count: int | None, latest: str | None,
     return _truncate("\n".join(lines), TEXT_LIMIT - 100)
 
 
-def _chapter_line(chapter: Chapter, releases: int = 1) -> str:
-    parts = [f'<a href="{chapter.url}">{_escape(chapter.label)}</a> 🇮🇩']
+def _chapter_line(chapter: Chapter, releases: int = 1,
+                  lang: str = mangadex.INDONESIAN_LANG) -> str:
+    parts = [f'<a href="{chapter.url}">{_escape(chapter.label)}</a> {_lang_flag(lang)}']
     if chapter.title:
         parts.append(_escape(_truncate(chapter.title, 60)))
     if chapter.group:
@@ -315,6 +359,23 @@ def _read_keyboard(token: str, prev_number: str | None, next_number: str | None,
     return InlineKeyboardMarkup(rows)
 
 
+def _english_offer_text(query_text: str) -> str:
+    """Pesan penawaran versi Inggris ketika judul tanpa chapter Indonesia."""
+    return (
+        f'Tidak ada chapter Bahasa Indonesia untuk "{_escape(query_text)}".\n'
+        "Ingin melihat versi Bahasa Inggrisnya?\n\n"
+        f"{mangadex.source_credit()}"
+    )
+
+
+def _english_offer_keyboard(token: str) -> InlineKeyboardMarkup:
+    """Tombol konfirmasi; pencarian Inggris hanya jalan setelah "Yes, English"."""
+    return InlineKeyboardMarkup([[
+        InlineKeyboardButton("Yes, English", callback_data=_callback("yes", token)),
+        InlineKeyboardButton("No, Cancel", callback_data=_callback("no", token)),
+    ]])
+
+
 # ---------------------------------------------------------------------------
 # Alur bantuan
 # ---------------------------------------------------------------------------
@@ -362,8 +423,15 @@ async def _resolve_titles(query_text: str, category: str | None) -> list[Title]:
 
 
 async def _not_found_fallback(message, query_text: str, category: str | None,
-                              not_found_text: str) -> None:
-    """Beda 'judul tidak ada' dengan 'judul ada tapi tanpa chapter Indonesia'."""
+                              not_found_text: str, purpose: str = "search",
+                              number: float | None = None) -> None:
+    """Beda 'judul tidak ada' dengan 'judul ada tapi tanpa chapter Indonesia'.
+
+    Pada kasus kedua, bot MENAWARKAN versi Bahasa Inggris lewat tombol
+    "Yes, English" / "No, Cancel". Pencarian Inggris hanya dijalankan bila
+    pengguna menekan "Yes, English" (lihat ``_start_english_from_offer``);
+    tanpa konfirmasi, tidak ada chapter Inggris yang dicari atau ditampilkan.
+    """
     try:
         any_titles = await mangadex.search_titles(query_text, category)
     except MangaDexError:
@@ -371,8 +439,11 @@ async def _not_found_fallback(message, query_text: str, category: str | None,
         return
     if not any_titles:
         await message.edit_text(not_found_text)
-    else:
-        await message.edit_text(f"{NO_ID_CHAPTERS}\n\n{mangadex.source_credit()}")
+        return
+    token = _new_session(kind="langoffer", query=query_text, category=category,
+                         purpose=purpose, number=number)
+    await message.edit_text(_english_offer_text(query_text),
+                            reply_markup=_english_offer_keyboard(token))
 
 
 # ---------------------------------------------------------------------------
@@ -397,7 +468,8 @@ async def _cmd_search(update: Update, context: ContextTypes.DEFAULT_TYPE,
 
     if not titles:
         await _not_found_fallback(status_msg, query_text, category,
-                                  not_found_prefix.format(q=query_text))
+                                  not_found_prefix.format(q=query_text),
+                                  purpose="search")
         return
 
     token = _new_session(kind="search", query=query_text, category=category,
@@ -419,7 +491,8 @@ async def _render_search_page(message, token: str, index: int) -> None:
     title = titles[index]
     show_category = bool(session.get("show_category"))
     label_info = "Manhwa Info" if session.get("category") == "manhwa" else "Manga Info"
-    caption = _title_caption(title, show_category=show_category)
+    lang = session.get("lang", mangadex.INDONESIAN_LANG)
+    caption = _title_caption(title, show_category=show_category, lang=lang)
     keyboard = _search_keyboard(token, index, len(titles), title.url, label_info)
 
     if title.cover_url:
@@ -461,7 +534,8 @@ async def chapter_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
     if not titles:
         await _not_found_fallback(status_msg, query_text, None,
-                                  f'Judul "{query_text}" tidak ditemukan.')
+                                  f'Judul "{query_text}" tidak ditemukan.',
+                                  purpose="chapters")
         return
 
     if len(titles) > 1:
@@ -539,7 +613,8 @@ async def read_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     if not titles:
         await _not_found_fallback(status_msg, query_text, None,
-                                  f'Judul "{query_text}" tidak ditemukan.')
+                                  f'Judul "{query_text}" tidak ditemukan.',
+                                  purpose="read", number=number)
         return
 
     if len(titles) > 1:
@@ -588,9 +663,10 @@ async def _send_info(message, title: Title) -> None:
                              disable_web_page_preview=True)
 
 
-async def _send_chapter_list(message, title: Title, page: int) -> None:
+async def _send_chapter_list(message, title: Title, page: int,
+                             lang: str = mangadex.INDONESIAN_LANG) -> None:
     try:
-        chapters, truncated = await mangadex.get_indonesian_chapters(title.id)
+        chapters, truncated = await mangadex.get_chapters(title.id, lang)
     except MangaDexError as exc:
         logger.warning("Gagal mengambil chapter %s: %s", title.id, exc)
         await message.reply_text(_error_text(exc))
@@ -599,23 +675,23 @@ async def _send_chapter_list(message, title: Title, page: int) -> None:
     groups = group_releases(chapters)
     if not groups:
         await message.reply_text(
-            f"{NO_ID_CHAPTERS}\n\n{mangadex.source_credit()}")
+            f"{_no_chapters_text(lang)}\n\n{mangadex.source_credit()}")
         return
 
     total_pages = (len(groups) + CHAPTER_PAGE_SIZE - 1) // CHAPTER_PAGE_SIZE
     page = max(0, min(page, total_pages - 1))
-    token = _new_session(kind="chapters", title=title)
+    token = _new_session(kind="chapters", title=title, lang=lang)
 
     start = page * CHAPTER_PAGE_SIZE
     end = start + CHAPTER_PAGE_SIZE
     lines = [
-        f"<b>📖 Chapter Indonesia — {_escape(title.title)}</b>",
-        f"Bahasa: Indonesia (id) • Total: {len(groups)} chapter"
+        f"<b>📖 Chapter {_lang_name(lang)} — {_escape(title.title)}</b>",
+        f"{_lang_line(lang)} • Total: {len(groups)} chapter"
         + (" (daftar terpotong)" if truncated else ""),
         "",
     ]
     for offset, (key, releases) in enumerate(groups[start:end], start=start + 1):
-        lines.append(f"{offset}. {_chapter_line(releases[0], len(releases))}")
+        lines.append(f"{offset}. {_chapter_line(releases[0], len(releases), lang)}")
     lines += ["", "Source: MangaDex"]
 
     keyboard = _chapters_keyboard(token, page, total_pages, groups,
@@ -626,7 +702,8 @@ async def _send_chapter_list(message, title: Title, page: int) -> None:
 
 
 async def _send_release_picker(message, title: Title, number: float,
-                               releases: list[Chapter]) -> None:
+                               releases: list[Chapter],
+                               lang: str = mangadex.INDONESIAN_LANG) -> None:
     labels = []
     for release in releases:
         label = release.group or "Grup tidak diketahui"
@@ -634,15 +711,16 @@ async def _send_release_picker(message, title: Title, number: float,
             label += f" • {release.publish_at[:10]}"
         labels.append(label)
     token = _new_session(kind="releases", title=title, number=number,
-                         releases=releases)
+                         releases=releases, lang=lang)
     await message.reply_text(
-        f"Pilih rilisan chapter {number:g} Bahasa Indonesia:",
+        f"Pilih rilisan chapter {number:g} Bahasa {_lang_name(lang)}:",
         reply_markup=_picker_keyboard("g2", token, labels, prefix="🏛️ "))
 
 
-async def _start_read(message, title: Title, number: float) -> None:
+async def _start_read(message, title: Title, number: float,
+                      lang: str = mangadex.INDONESIAN_LANG) -> None:
     try:
-        releases = await mangadex.get_releases(title.id, number)
+        releases = await mangadex.get_releases(title.id, number, lang)
     except MangaDexError as exc:
         logger.warning("Mengambil rilisan ch %s/%s gagal: %s", title.id, number, exc)
         await message.reply_text(_error_text(exc))
@@ -651,22 +729,23 @@ async def _start_read(message, title: Title, number: float) -> None:
     if not releases:
         await message.reply_text(
             f"{CHAPTER_NOT_FOUND}\n\nNomor {number:g} tidak punya rilisan "
-            f"Bahasa Indonesia.\n\n{mangadex.source_credit()}")
+            f"Bahasa {_lang_name(lang)}.\n\n{mangadex.source_credit()}")
         return
 
     if len(releases) > 1:
-        await _send_release_picker(message, title, number, releases)
+        await _send_release_picker(message, title, number, releases, lang)
         return
 
-    await _send_pages(message, title, releases[0])
+    await _send_pages(message, title, releases[0], lang)
 
 
 async def _neighbour_numbers(title: Title, number: float | None,
-                             chapter_id: str | None = None
+                             chapter_id: str | None = None,
+                             lang: str = mangadex.INDONESIAN_LANG
                              ) -> tuple[str | None, str | None]:
     """Nomor chapter sebelum & sesudah posisi sekarang (untuk tombol navigasi)."""
     try:
-        chapters, _ = await mangadex.get_indonesian_chapters(title.id)
+        chapters, _ = await mangadex.get_chapters(title.id, lang)
     except MangaDexError:
         return None, None
     numbers: list[str] = []
@@ -699,7 +778,8 @@ async def _neighbour_numbers(title: Title, number: float | None,
     return prev_number, next_number
 
 
-async def _send_pages(message, title: Title, chapter: Chapter) -> None:
+async def _send_pages(message, title: Title, chapter: Chapter,
+                      lang: str = mangadex.INDONESIAN_LANG) -> None:
     status_msg = await message.reply_text("Mengambil halaman chapter...")
     try:
         pages = await mangadex.get_pages(chapter.id)
@@ -734,7 +814,7 @@ async def _send_pages(message, title: Title, chapter: Chapter) -> None:
         caption_lines.append(_escape(_truncate(chapter.title, 80)))
     if chapter.group:
         caption_lines.append(f"🏛️ Grup: {_escape(_truncate(chapter.group, 50))}")
-    caption_lines.append("Bahasa: Indonesia (id)")
+    caption_lines.append(_lang_line(lang))
     if truncated:
         caption_lines.append(f"⚠️ Menampilkan {MAX_PAGES_SEND} halaman pertama.")
     elif len(images) < len(pages):
@@ -748,10 +828,11 @@ async def _send_pages(message, title: Title, chapter: Chapter) -> None:
         pass  # pesan status bisa saja sudah terhapus
     sent_ok = await _send_media_batches(message, images, caption)
     prev_number, next_number = await _neighbour_numbers(
-        title, None, chapter_id=chapter.id)
+        title, None, chapter_id=chapter.id, lang=lang)
     if sent_ok:
-        keyboard = _read_keyboard(_new_session(kind="reader", title=title),
-                                  prev_number, next_number, title.id)
+        keyboard = _read_keyboard(
+            _new_session(kind="reader", title=title, lang=lang),
+            prev_number, next_number, title.id)
         try:
             await message.reply_text(
                 f"✅ {_escape(chapter.label)} selesai.",
@@ -812,6 +893,60 @@ async def _send_media_batches(message, images: list[bytes], caption: str) -> boo
 # Callback inline
 # ---------------------------------------------------------------------------
 
+async def _start_english_from_offer(query, offer: dict) -> None:
+    """Jalankan pencarian Bahasa Inggris — HANYA setelah "Yes, English".
+
+    Tidak pernah dijalankan otomatis: hanya dipanggil dari aksi callback
+    "yes" pada sesi penawaran (kind="langoffer"). Bila judul juga tidak
+    punya chapter Inggris, pengguna diberi pesan yang jelas tanpa
+    mengganti judul lain.
+    """
+    query_text = offer.get("query") or ""
+    category = offer.get("category")
+    purpose = offer.get("purpose") or "search"
+    lang = mangadex.ENGLISH_LANG
+
+    try:
+        titles = await mangadex.find_titles_with_language(query_text, category, lang)
+    except MangaDexError as exc:
+        logger.warning("Pencarian Inggris %r gagal: %s", query_text, exc)
+        await _edit_message(query, _error_text(exc), None)
+        return
+
+    if not titles:
+        await _edit_message(
+            query, f"{NO_EN_CHAPTERS}\n\n{mangadex.source_credit()}", None)
+        return
+
+    if purpose == "search":
+        token = _new_session(kind="search", query=query_text, category=category,
+                             titles=titles, lang=lang,
+                             show_category=category is None)
+        await _render_search_page_from_callback(query, token, 0)
+        return
+
+    if purpose in ("chapters", "read"):
+        if len(titles) > 1:
+            token = _new_session(kind="resolve", purpose=purpose,
+                                 query=query_text, titles=titles,
+                                 number=offer.get("number"), lang=lang)
+            await _edit_message(
+                query, PICK_A_TITLE,
+                _picker_keyboard("p", token, [t.title for t in titles],
+                                 prefix="📚 "))
+            return
+        if purpose == "chapters":
+            await _edit_message(query, "Mengambil daftar chapter...", None)
+            await _send_chapter_list_from_callback(query, titles[0], 0, lang)
+        else:
+            await _edit_message(query, "Mencari chapter...", None)
+            await _start_read_from_callback(query, titles[0],
+                                            float(offer.get("number")), lang)
+        return
+
+    await _edit_message(query, EXPIRED_SESSION, None)
+
+
 async def manga_callback(update: Update,
                          context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
@@ -841,6 +976,23 @@ async def manga_callback(update: Update,
         if action == "noop":
             return
 
+        if action == "yes":  # konfirmasi melihat versi Bahasa Inggris
+            if session.get("kind") != "langoffer":
+                await _edit_message(query, EXPIRED_SESSION, None)
+                return
+            SESSIONS.pop(token, None)  # sekali pakai; tolak tekan ulang
+            await _edit_message(query, "Mencari chapter Bahasa Inggris...", None)
+            await _start_english_from_offer(query, session)
+            return
+
+        if action == "no":  # pengguna menolak; batalkan tanpa chapter Inggris
+            if session.get("kind") != "langoffer":
+                await _edit_message(query, EXPIRED_SESSION, None)
+                return
+            SESSIONS.pop(token, None)
+            await _edit_message(query, CANCELLED_ENGLISH, None)
+            return
+
         if action == "s":  # halaman hasil pencarian berikutnya
             await _render_search_page_from_callback(query, token, int(extra))
             return
@@ -849,6 +1001,7 @@ async def manga_callback(update: Update,
             titles: list[Title] = session.get("titles") or []
             kind = session.get("kind")
             title = session.get("title")
+            lang = session.get("lang", mangadex.INDONESIAN_LANG)
             page = 0
             if title is None:
                 # sesi hasil pencarian / pemilih judul: extra = indeks judul
@@ -862,10 +1015,10 @@ async def manga_callback(update: Update,
                 page = int(extra or 0)
             if action == "i":
                 await _edit_message(query, "Mengambil info...", None)
-                await _send_info_from_callback(query, title)
+                await _send_info_from_callback(query, title, lang)
             else:
                 await _edit_message(query, "Mengambil daftar chapter...", None)
-                await _send_chapter_list_from_callback(query, title, page)
+                await _send_chapter_list_from_callback(query, title, page, lang)
             return
 
         if action == "p":  # memilih judul dari daftar kandidat
@@ -876,23 +1029,26 @@ async def manga_callback(update: Update,
                 return
             title = titles[index]
             purpose = session.get("purpose")
+            lang = session.get("lang", mangadex.INDONESIAN_LANG)
             if purpose == "chapters":
                 await _edit_message(query, "Mengambil daftar chapter...", None)
-                await _send_chapter_list_from_callback(query, title, 0)
+                await _send_chapter_list_from_callback(query, title, 0, lang)
             elif purpose == "info":
                 await _edit_message(query, "Mengambil info...", None)
-                await _send_info_from_callback(query, title)
+                await _send_info_from_callback(query, title, lang)
             elif purpose == "read":
                 await _edit_message(query, "Mencari chapter...", None)
                 await _start_read_from_callback(query, title,
-                                                float(session.get("number")))
+                                                float(session.get("number")),
+                                                lang)
             else:
                 await _edit_message(query, EXPIRED_SESSION, None)
             return
 
         if action == "g":  # chapter dengan beberapa rilisan -> pilih rilis
             title = session.get("title")
-            chapters, _ = await mangadex.get_indonesian_chapters(title.id)
+            lang = session.get("lang", mangadex.INDONESIAN_LANG)
+            chapters, _ = await mangadex.get_chapters(title.id, lang)
             releases = [c for c in chapters
                         if (str(c.number) if c.number else "oneshot") == extra]
             if not releases:
@@ -908,11 +1064,11 @@ async def manga_callback(update: Update,
                 if release.publish_at:
                     label += f" • {release.publish_at[:10]}"
                 labels.append(label)
-            token2 = _new_session(kind="releases", title=title,
+            token2 = _new_session(kind="releases", title=title, lang=lang,
                                   number=extra, releases=releases)
             await _edit_message(
                 query,
-                f"Pilih rilisan chapter {_escape(extra)} Bahasa Indonesia:",
+                f"Pilih rilisan chapter {_escape(extra)} Bahasa {_lang_name(lang)}:",
                 _picker_keyboard("g2", token2, labels, prefix="🏛️ "))
             return
 
@@ -923,8 +1079,9 @@ async def manga_callback(update: Update,
                 await _edit_message(query, PICK_A_TITLE, None)
                 return
             title = session.get("title")
+            lang = session.get("lang", mangadex.INDONESIAN_LANG)
             await _edit_message(query, "Mengambil halaman chapter...", None)
-            await _send_pages_from_callback(query, title, releases[index])
+            await _send_pages_from_callback(query, title, releases[index], lang)
             return
 
         if action == "r":  # baca nomor chapter tertentu
@@ -942,7 +1099,9 @@ async def manga_callback(update: Update,
                 await _edit_message(query, CHAPTER_NOT_FOUND, None)
                 return
             await _edit_message(query, "Mencari chapter...", None)
-            await _start_read_from_callback(query, title, number)
+            await _start_read_from_callback(
+                query, title, number,
+                session.get("lang", mangadex.INDONESIAN_LANG))
             return
 
         if action == "menu":  # kembali ke menu utama fitur manga
@@ -973,16 +1132,18 @@ async def _render_search_page_from_callback(query, token: str, index: int) -> No
     title = titles[index]
     show_category = bool(session.get("show_category"))
     label_info = "Manhwa Info" if session.get("category") == "manhwa" else "Manga Info"
-    caption = _title_caption(title, show_category=show_category)
+    lang = session.get("lang", mangadex.INDONESIAN_LANG)
+    caption = _title_caption(title, show_category=show_category, lang=lang)
     keyboard = _search_keyboard(token, index, len(titles), title.url, label_info)
     # pesan hasil bisa berupa foto; edit caption-nya kalau begitu
     is_photo = bool(getattr(query.message, "photo", None))
     await _edit_message(query, caption, keyboard, as_caption=is_photo)
 
 
-async def _send_chapter_list_from_callback(query, title: Title, page: int) -> None:
+async def _send_chapter_list_from_callback(query, title: Title, page: int,
+                                           lang: str = mangadex.INDONESIAN_LANG) -> None:
     try:
-        chapters, truncated = await mangadex.get_indonesian_chapters(title.id)
+        chapters, truncated = await mangadex.get_chapters(title.id, lang)
     except MangaDexError as exc:
         logger.warning("Callback: chapter %s gagal: %s", title.id, exc)
         await _edit_message(query, _error_text(exc), None)
@@ -990,22 +1151,22 @@ async def _send_chapter_list_from_callback(query, title: Title, page: int) -> No
 
     groups = group_releases(chapters)
     if not groups:
-        await _edit_message(query, NO_ID_CHAPTERS, None)
+        await _edit_message(query, _no_chapters_text(lang), None)
         return
 
     total_pages = (len(groups) + CHAPTER_PAGE_SIZE - 1) // CHAPTER_PAGE_SIZE
     page = max(0, min(page, total_pages - 1))
-    token = _new_session(kind="chapters", title=title)
+    token = _new_session(kind="chapters", title=title, lang=lang)
     start = page * CHAPTER_PAGE_SIZE
     lines = [
-        f"<b>📖 Chapter Indonesia — {_escape(title.title)}</b>",
-        f"Bahasa: Indonesia (id) • Total: {len(groups)} chapter"
+        f"<b>📖 Chapter {_lang_name(lang)} — {_escape(title.title)}</b>",
+        f"{_lang_line(lang)} • Total: {len(groups)} chapter"
         + (" (daftar terpotong)" if truncated else ""),
         "",
     ]
     for offset, (key, releases) in enumerate(groups[start:start + CHAPTER_PAGE_SIZE],
                                              start=start + 1):
-        lines.append(f"{offset}. {_chapter_line(releases[0], len(releases))}")
+        lines.append(f"{offset}. {_chapter_line(releases[0], len(releases), lang)}")
     lines += ["", "Source: MangaDex"]
     keyboard = _chapters_keyboard(token, page, total_pages, groups,
                                   title.url, title.id)
@@ -1013,14 +1174,15 @@ async def _send_chapter_list_from_callback(query, title: Title, page: int) -> No
                         keyboard)
 
 
-async def _send_info_from_callback(query, title: Title) -> None:
+async def _send_info_from_callback(query, title: Title,
+                                   lang: str = mangadex.INDONESIAN_LANG) -> None:
     try:
-        id_count, latest = await mangadex.indonesian_stats(title.id)
+        count, latest = await mangadex.language_stats(title.id, lang)
     except MangaDexError as exc:
         logger.warning("Callback: info %s gagal: %s", title.id, exc)
         await _edit_message(query, _error_text(exc), None)
         return
-    text = _info_text(title, id_count or None, latest)
+    text = _info_text(title, count or None, latest, lang=lang)
     keyboard = InlineKeyboardMarkup([[
         InlineKeyboardButton("📖 Chapters", url=title.url),
         InlineKeyboardButton("🌐 Open Source", url=title.url),
@@ -1028,9 +1190,10 @@ async def _send_info_from_callback(query, title: Title) -> None:
     await _edit_message(query, text, keyboard)
 
 
-async def _start_read_from_callback(query, title: Title, number: float) -> None:
+async def _start_read_from_callback(query, title: Title, number: float,
+                                    lang: str = mangadex.INDONESIAN_LANG) -> None:
     try:
-        releases = await mangadex.get_releases(title.id, number)
+        releases = await mangadex.get_releases(title.id, number, lang)
     except MangaDexError as exc:
         logger.warning("Callback: rilisan %s ch %s gagal: %s", title.id, number, exc)
         await _edit_message(query, _error_text(exc), None)
@@ -1039,7 +1202,7 @@ async def _start_read_from_callback(query, title: Title, number: float) -> None:
         await _edit_message(
             query,
             f"{CHAPTER_NOT_FOUND}\n\nNomor {number:g} tidak punya rilisan "
-            f"Bahasa Indonesia.\n\n{mangadex.source_credit()}", None)
+            f"Bahasa {_lang_name(lang)}.\n\n{mangadex.source_credit()}", None)
         return
     if len(releases) > 1:
         labels = []
@@ -1049,17 +1212,18 @@ async def _start_read_from_callback(query, title: Title, number: float) -> None:
                 label += f" • {release.publish_at[:10]}"
             labels.append(label)
         token = _new_session(kind="releases", title=title, number=number,
-                             releases=releases)
+                             releases=releases, lang=lang)
         await _edit_message(
             query,
-            f"Pilih rilisan chapter {number:g} Bahasa Indonesia:",
+            f"Pilih rilisan chapter {number:g} Bahasa {_lang_name(lang)}:",
             _picker_keyboard("g2", token, labels, prefix="🏛️ "))
         return
     await _edit_message(query, "Mengambil halaman chapter...", None)
-    await _send_pages_from_callback(query, title, releases[0])
+    await _send_pages_from_callback(query, title, releases[0], lang)
 
 
-async def _send_pages_from_callback(query, title: Title, chapter: Chapter) -> None:
+async def _send_pages_from_callback(query, title: Title, chapter: Chapter,
+                                    lang: str = mangadex.INDONESIAN_LANG) -> None:
     try:
         pages = await mangadex.get_pages(chapter.id)
     except MangaDexError as exc:
@@ -1088,7 +1252,7 @@ async def _send_pages_from_callback(query, title: Title, chapter: Chapter) -> No
         caption_lines.append(_escape(_truncate(chapter.title, 80)))
     if chapter.group:
         caption_lines.append(f"🏛️ Grup: {_escape(_truncate(chapter.group, 50))}")
-    caption_lines.append("Bahasa: Indonesia (id)")
+    caption_lines.append(_lang_line(lang))
     if truncated or len(images) < len(pages):
         caption_lines.append("⚠️ Sebagian halaman tidak ikut terkirim.")
     caption_lines.append("Source: MangaDex")
@@ -1096,10 +1260,11 @@ async def _send_pages_from_callback(query, title: Title, chapter: Chapter) -> No
 
     sent_ok = await _send_media_batches(message, images, caption)
     prev_number, next_number = await _neighbour_numbers(
-        title, None, chapter_id=chapter.id)
+        title, None, chapter_id=chapter.id, lang=lang)
     if sent_ok:
-        keyboard = _read_keyboard(_new_session(kind="reader", title=title),
-                                  prev_number, next_number, title.id)
+        keyboard = _read_keyboard(
+            _new_session(kind="reader", title=title, lang=lang),
+            prev_number, next_number, title.id)
         await _edit_message(
             query, f"✅ {_escape(chapter.label)} selesai.", keyboard)
     else:

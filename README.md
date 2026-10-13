@@ -9,7 +9,7 @@ A Telegram bot that downloads TikTok, Instagram & Pinterest videos and photo pos
 - Downloads Instagram reels/posts via `yt-dlp`, with `instaloader` and `og:image` fallbacks (full-resolution photos); optional `cookies.txt` for login-required posts
 - Downloads Pinterest pins at highest quality (`/originals/` upgrade); large photos are sent as documents to avoid Telegram recompression
 - `/anime {title}` — searches MyAnimeList and shows the cover image, episodes, status, score, and full synopsis in one message
-- `/manga`, `/manhwa`, `/comic`, `/chapter`, `/read`, `/mangainfo` — Indonesian-language manga & manhwa search and reading via the official MangaDex API (Indonesian chapters only, never an English fallback)
+- `/manga`, `/manhwa`, `/comic`, `/chapter`, `/read`, `/mangainfo` — Indonesian-language manga & manhwa search and reading via the official MangaDex API (Indonesian chapters first; English chapters are only searched and shown after the user explicitly confirms via a `Yes, English` / `No, Cancel` inline button)
 - `/pdf` — converts an uploaded PDF into an editable Word `.docx` (reply to the document, or send the PDF with `/pdf` as caption)
 - `/word` — converts an uploaded Word `.docx`/`.doc` into a PDF (reply to the document, or send it with `/word` as caption)
 - `/feature` — lists every feature that is actually implemented in the bot, grouped by category
@@ -147,11 +147,17 @@ Acceptable Usage Policy applies and is respected here:
   sends the original link instead of images — it never bypasses access controls,
 - results are restricted to `safe`/`suggestive` content ratings.
 
-**Indonesian-only guarantee:** every chapter query passes MangaDex's
+**Indonesian-first guarantee:** every chapter query passes MangaDex's
 `translatedLanguage[]=id` filter and the response is filtered again client-side.
-A title is only shown when the feed confirms Indonesian chapters exist — the bot
-never falls back to English chapters, and says so explicitly when a title has no
-Indonesian release ("Tidak ada chapter Bahasa Indonesia yang tersedia...").
+A title is only shown with Indonesian chapters when the feed confirms they exist,
+and Indonesian releases are never substituted automatically. When a title has no
+Indonesian release, the bot offers the English version with `Yes, English` /
+`No, Cancel` inline buttons ("Tidak ada chapter Bahasa Indonesia untuk ...").
+English chapters are searched and displayed only after the user presses
+`Yes, English`; pressing `No, Cancel` ends the search without showing anything
+in English, and the offer cannot be replayed (single-use session + in-flight
+guard + normal 30-minute expiry). If no English release exists either, the bot
+says so instead of substituting titles. Both language paths credit MangaDex.
 Title categories (manga vs manhwa) come from the `originalLanguage` metadata
 (`ja` → manga, `ko` → manhwa), never from the title text.
 
@@ -163,7 +169,8 @@ cached in-memory (5–10 minutes) to avoid repeat lookups.
 
 - MangaDex does not carry every Indonesian scanlation. Popular manhwa in particular
   often have **zero** Indonesian chapters on MangaDex (e.g. Solo Leveling) — the bot
-  reports that accurately instead of substituting English chapters.
+  reports that accurately and offers the English version only with explicit consent;
+  if no English release exists either, it says so instead of substituting titles.
 - For very long series the chapter list is fetched up to 1,500 entries; if a title has
   more, the list is marked "daftar terpotong" (truncated) rather than pretending to be
   complete.
@@ -263,13 +270,16 @@ password-protected / empty files, the file-size limit, iLovePDF HTTP errors (401
 and timeouts, temp-file cleanup after both successful and failed conversions, concurrent users,
 duplicate commands, secret-key hygiene in logs, and Telegram handler routing.
 
-The manga suite runs fully offline (provider calls mocked) and covers: Indonesian-only
+The manga suite runs fully offline (provider calls mocked) and covers: Indonesian-first
 language filtering (including mixed-language API responses), category classification from
-`originalLanguage` metadata, skipping titles without Indonesian chapters (no English
-fallback), `/read` argument parsing, release pickers for multiple scanlation groups,
-chapter pagination, inline-button flows (view chapters, info, next results, previous/next
-chapter), expired/invalid/duplicate callbacks, source-error and rate-limit messages,
-HTML escaping, `/feature` registration and handler routing.
+`originalLanguage` metadata, skipping titles without Indonesian chapters, the consent-based
+English fallback (offer buttons shown without any English lookup, `Yes, English` → English
+search/chapters/reading with pagination and navigation, `No, Cancel` → cancel, single-use
+and expired offers, duplicate presses, and the English-unavailable message), `/read`
+argument parsing, release pickers for multiple scanlation groups, chapter pagination,
+inline-button flows (view chapters, info, next results, previous/next chapter),
+expired/invalid/duplicate callbacks, source-error and rate-limit messages, HTML escaping,
+`/feature` registration and handler routing.
 
 ## Troubleshooting
 - **Download fails for most video links**: update yt-dlp (`pip install -U yt-dlp`) — TikTok frequently changes its site structure.
