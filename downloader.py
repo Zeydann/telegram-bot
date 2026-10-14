@@ -29,12 +29,52 @@ class _YtDlpQuietLogger:
     def error(self, msg): pass
 
 
+VIDEO_EXTS = {".mp4", ".mov", ".webm", ".mkv"}
+IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp"}
+
+
+def _kind_of(path: str) -> str:
+    """Kembalikan jenis media: "video" atau "photo"."""
+    return "video" if os.path.splitext(path)[1].lower() in VIDEO_EXTS else "photo"
+
+
 @dataclass
 class DownloadResult:
-    media_type: str  # "video" or "images"
+    media_type: str  # "video", "images" or "mixed"
     files: list[str] = field(default_factory=list)
     author: str | None = None
     description: str | None = None
+    # (path, jenis) sesuai urutan asli postingan — penting untuk carousel
+    # Instagram yang isinya campur foto & video.
+    media: list[tuple[str, str]] = field(default_factory=list)
+
+    @property
+    def media_items(self) -> list[tuple[str, str]]:
+        """Daftar (path, "video"|"photo"). Isi dari `media`, atau disari dari `files`."""
+        if self.media:
+            return self.media
+        return [(path, _kind_of(path)) for path in self.files]
+
+
+def _build_media_result(
+    files: list[str], author: str | None = None, description: str | None = None
+) -> DownloadResult:
+    """Buat DownloadResult dari daftar file (urutan dipertahankan)."""
+    items = [(path, _kind_of(path)) for path in files]
+    kinds = {kind for _, kind in items}
+    if kinds == {"video"}:
+        media_type = "video"
+    elif kinds == {"photo"}:
+        media_type = "images"
+    else:
+        media_type = "mixed"
+    return DownloadResult(
+        media_type=media_type,
+        files=[path for path, _ in items],
+        author=author,
+        description=description,
+        media=items,
+    )
 
 
 def _run_ytdlp(url: str, job_dir: str, progress_hook=None, cookiefile=None) -> dict:
@@ -322,37 +362,24 @@ async def download_instagram(url: str, progress_callback=None) -> DownloadResult
         cleanup_job(job_dir)
         raise DownloadError("Media tidak ditemukan untuk link ini.")
 
-    video_exts = {".mp4", ".mov", ".webm", ".mkv"}
-    image_exts = {".jpg", ".jpeg", ".png", ".webp"}
+    # Hasil yt-dlp memakai %(id)s, jadi urutkan nama file supaya rapi.
+    media_files = sorted(files)
 
-    video_files = [f for f in files if os.path.splitext(f)[1].lower() in video_exts]
-    image_files = sorted(f for f in files if os.path.splitext(f)[1].lower() in image_exts)
-
-    if video_files:
-        video_path = video_files[0]
+    for video_path in (f for f in media_files if _kind_of(f) == "video"):
         size = os.path.getsize(video_path)
         if size > MAX_FILE_SIZE:
             cleanup_job(job_dir)
             raise DownloadError(
                 f"Ukuran video ({size // (1024*1024)}MB) melebihi batas yang diizinkan."
             )
-        return DownloadResult(
-            media_type="video",
-            files=[video_path],
-            author=author,
-            description=description,
-        )
 
-    if image_files:
-        return DownloadResult(
-            media_type="images",
-            files=image_files,
-            author=author,
-            description=description,
-        )
+    if not media_files:
+        cleanup_job(job_dir)
+        raise DownloadError("Format media tidak dikenali.")
 
-    cleanup_job(job_dir)
-    raise DownloadError("Format media tidak dikenali.")
+    # Kembalikan SEMUA media (video + foto), bukan hanya video pertama —
+    # postingan carousel Instagram bisa isinya campur foto dan video.
+    return _build_media_result(media_files, author=author, description=description)
 
 
 async def _scrape_pinterest(url: str, job_dir: str, progress_callback=None) -> DownloadResult:
@@ -505,11 +532,14 @@ async def _instaloader_fetch(url: str, job_dir: str, progress_callback=None) -> 
 
     cookies = _instagram_httpx_cookies()
     headers = {"User-Agent": MOBILE_UA, "Referer": "https://www.instagram.com/"}
+    entries: list[tuple[str, str]] = []  # (path, jenis) sesuai urutan asli carousel
     async with httpx.AsyncClient(headers=headers, cookies=cookies, timeout=30, follow_redirects=True) as client:
-        files = []
         for i, (is_video, media_url) in enumerate(items):
+            if not media_url:
+                logger.warning("instaloader media %d has no URL, skipping", i)
+                continue
             ext = "mp4" if is_video else "jpg"
-            path = os.path.join(job_dir, f"media_{i}.{ext}")
+            path = os.path.join(job_dir, f"media_{i:02d}.{ext}")
             try:
                 async with client.stream("GET", media_url) as r:
                     r.raise_for_status()
@@ -522,26 +552,31 @@ async def _instaloader_fetch(url: str, job_dir: str, progress_callback=None) -> 
                             if progress_callback:
                                 percent = int(downloaded / total * 100) if total else None
                                 await progress_callback(percent, downloaded / (1024 * 1024))
-                files.append(path)
+                entries.append((path, "video" if is_video else "photo"))
             except Exception as e:
                 logger.warning("Failed to download instaloader media %d: %s", i, e)
 
-    if not files:
+    if not entries:
         raise DownloadError("Gagal mengunduh media dari postingan ini.")
 
     if progress_callback:
         await progress_callback(100, 0.0)
 
-    video_files = [f for f in files if f.endswith(".mp4")]
-    if video_files:
-        video_path = video_files[0]
-        size = os.path.getsize(video_path)
-        if size > MAX_FILE_SIZE:
-            cleanup_job(job_dir)
-            raise DownloadError(f"Ukuran video ({size // (1024*1024)}MB) melebihi batas.")
-        return DownloadResult(media_type="video", files=[video_path], author=author, description=caption)
+    # Postingan carousel sering isinya campur foto & video. Jangan buang
+    # yang satu karena yang lain — kirim semuanya sesuai urutan.
+    kept: list[tuple[str, str]] = []
+    for path, kind in entries:
+        if kind == "video" and os.path.getsize(path) > MAX_FILE_SIZE:
+            logger.warning("Skipping oversized Instagram video: %s", path)
+            continue
+        kept.append((path, kind))
 
-    return DownloadResult(media_type="images", files=sorted(files), author=author, description=caption)
+    if not kept:
+        raise DownloadError("Ukuran media melebihi batas yang diizinkan.")
+
+    return _build_media_result(
+        [path for path, _ in kept], author=author, description=caption
+    )
 
 
 async def _scrape_instagram(url: str, job_dir: str, progress_callback=None) -> DownloadResult:

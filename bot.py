@@ -7,11 +7,11 @@ import html as html_lib
 
 from config import (
     BOT_TOKEN, RATE_LIMIT_COUNT, RATE_LIMIT_WINDOW, ADMIN_ID, DOWNLOAD_DIR,
-    CONVERT_MAX_FILE_SIZE,
+    CONVERT_MAX_FILE_SIZE, MAX_FILE_SIZE,
 )
 from mal import search_anime, fetch_hd_image
 from utils import extract_url, is_tiktok_url, is_instagram_url, is_pinterest_url, sanitize_filename, RateLimiter, ProgressReporter
-from telegram import Update, InputMediaPhoto
+from telegram import Update, InputMediaPhoto, InputMediaVideo
 from telegram.request import HTTPXRequest
 from telegram.ext import (
     Application,
@@ -372,31 +372,18 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             await status_msg.edit_text(text)
 
         reporter = ProgressReporter(edit_status)
-        if is_tiktok:
-            result = await download_tiktok(url, progress_callback=reporter.update)
-        elif is_instagram:
-            result = await download_instagram(url, progress_callback=reporter.update)
-        else:
-            result = await download_pinterest(url, progress_callback=reporter.update)
-        job_dir = os.path.dirname(result.files[0])
+        result = await _run_download(is_tiktok, is_instagram, url, reporter)
+        items = result.media_items
+        if not items:
+            raise DownloadError("Media tidak ditemukan untuk link ini.")
+        job_dir = os.path.dirname(items[0][0])
         caption = _build_caption(result.author, result.description)
 
         await status_msg.edit_text("Mengirim media...")
 
-        if result.media_type == "video":
-            with open(result.files[0], "rb") as f:
-                try:
-                    await message.reply_video(
-                        video=f, caption=caption, parse_mode="HTML",
-                        read_timeout=120, write_timeout=120
-                    )
-                except Exception as send_err:
-                    logger.warning("send_video failed, falling back to document: %s", send_err)
-                    f.seek(0)
-                    await message.reply_document(document=f, caption=caption, parse_mode="HTML")
-
-        else:
-            await _send_image_group(message, result.files, caption)
+        # Kirim semua media (carousel Instagram bisa isinya
+        # banyak foto + video, jadi jangan cuma file pertama).
+        await _send_media(message, items, caption)
 
         await status_msg.delete()
         logger.info("Download completed for user %s", user.id)
@@ -424,26 +411,88 @@ def _build_caption(author: str | None, description: str | None) -> str:
         lines.append(f"<blockquote expandable>{desc}</blockquote>")
     return "\n".join(lines)
 
-async def _send_image_group(message, files: list[str], caption: str) -> None:
-    # Foto > 9MB tidak bisa dikirim sebagai photo (limit Telegram 10MB, dan
-    # Telegram bisa recompress foto) — kirim sebagai document agar kualitas HD utuh.
-    if any(os.path.getsize(f) > 9 * 1024 * 1024 for f in files):
-        await _send_as_documents(message, files, caption)
+async def _run_download(is_tiktok: bool, is_instagram: bool, url: str, reporter):
+    """Pilih downloader sesuai platform link."""
+    if is_tiktok:
+        return await download_tiktok(url, progress_callback=reporter.update)
+    if is_instagram:
+        return await download_instagram(url, progress_callback=reporter.update)
+    return await download_pinterest(url, progress_callback=reporter.update)
+
+
+# Foto > 9MB tidak bisa dikirim sebagai photo (limit Telegram 10MB, dan
+# Telegram bisa recompress foto) — kirim sebagai document agar kualitas HD utuh.
+PHOTO_INLINE_LIMIT = 9 * 1024 * 1024
+
+
+async def _send_media(message, items: list[tuple[str, str]], caption: str) -> None:
+    """Kirim daftar (path, jenis) — mendukung carousel campur foto & video."""
+    if len(items) == 1:
+        path, kind = items[0]
+        if kind == "photo":
+            if os.path.getsize(path) > PHOTO_INLINE_LIMIT:
+                await _send_as_documents(message, [path], caption)
+            else:
+                with open(path, "rb") as f:
+                    await message.reply_photo(
+                        photo=f, caption=caption, parse_mode="HTML",
+                        read_timeout=120, write_timeout=120,
+                    )
+            return
+        with open(path, "rb") as f:
+            try:
+                await message.reply_video(
+                    video=f, caption=caption, parse_mode="HTML",
+                    read_timeout=120, write_timeout=120
+                )
+            except Exception as send_err:
+                logger.warning("send_video failed, falling back to document: %s", send_err)
+                f.seek(0)
+                await message.reply_document(document=f, caption=caption, parse_mode="HTML")
         return
 
-    batches = [files[i:i + MAX_MEDIA_GROUP] for i in range(0, len(files), MAX_MEDIA_GROUP)]
+    # Beberapa media → kirim sebagai media group (boleh campur foto & video,
+    # urutannya tetap sama seperti di postingan).
+    inline: list[tuple[str, str]] = []
+    as_documents: list[str] = []
+    for path, kind in items:
+        size = os.path.getsize(path)
+        if kind == "video" and size > MAX_FILE_SIZE:
+            as_documents.append(path)
+        elif kind == "photo" and size > PHOTO_INLINE_LIMIT:
+            as_documents.append(path)
+        else:
+            inline.append((path, kind))
+
+    await _send_as_media_group(message, inline, caption)
+    if as_documents:
+        # Caption sudah terkirim di media group pertama (kalau ada).
+        await _send_as_documents(message, as_documents, caption if not inline else None)
+
+
+async def _send_as_media_group(message, items: list[tuple[str, str]], caption: str) -> None:
     opened_files = []
     try:
-        for batch_index, batch in enumerate(batches):
+        for batch_index, start in enumerate(range(0, len(items), MAX_MEDIA_GROUP)):
+            batch = items[start:start + MAX_MEDIA_GROUP]
             media = []
-            for i, path in enumerate(batch):
+            for i, (path, kind) in enumerate(batch):
                 f = open(path, "rb")
                 opened_files.append(f)
                 cap = caption if (batch_index == 0 and i == 0) else None
-                media.append(InputMediaPhoto(media=f, caption=cap, parse_mode="HTML" if cap else None))
-            await message.reply_media_group(
-                media=media, read_timeout=180, write_timeout=180, connect_timeout=30
-            )
+                cls = InputMediaVideo if kind == "video" else InputMediaPhoto
+                media.append(cls(media=f, caption=cap, parse_mode="HTML" if cap else None))
+            try:
+                await message.reply_media_group(
+                    media=media, read_timeout=180, write_timeout=180, connect_timeout=30
+                )
+            except Exception as send_err:
+                # Biasanya format video tidak didukung Telegram — kirim apa adanya.
+                logger.warning("media group failed, falling back to documents: %s", send_err)
+                for item in media:
+                    item.media.close()
+                fallback_cap = caption if batch_index == 0 else None
+                await _send_as_documents(message, [p for p, _ in batch], fallback_cap)
     finally:
         for f in opened_files:
             try:
