@@ -6,7 +6,7 @@ Perintah yang tersedia:
     /comic <judul>        — cari manga dan manhwa sekaligus
     /chapter <judul>      — daftar chapter Bahasa Indonesia
     /read <judul> <ch>    — baca chapter Indonesia
-    /mangainfo <judul>    — detail judul
+    /mangainfo <judul>    — detail judul + cover
     /mangafeature         — daftar command
 
 Aturan Bahasa (paling penting): pencarian SELALU dimulai dari chapter dengan
@@ -89,7 +89,7 @@ MANGAFEATURE_HTML = (
     "• <code>/comic &lt;judul&gt;</code> — Cari manga dan manhwa sekaligus.\n"
     "• <code>/chapter &lt;judul&gt;</code> — Lihat daftar chapter Bahasa Indonesia.\n"
     "• <code>/read &lt;judul&gt; &lt;chapter&gt;</code> — Baca atau buka chapter Indonesia.\n"
-    "• <code>/mangainfo &lt;judul&gt;</code> — Lihat detail judul.\n"
+    "• <code>/mangainfo &lt;judul&gt;</code> — Lihat detail judul beserta cover-nya.\n"
     "• <code>/mangafeature</code> — Lihat daftar fitur manga dan manhwa.\n\n"
     "<i>Utamakan chapter Bahasa Indonesia; versi Inggris hanya ditampilkan "
     "setelah konfirmasi lewat tombol.</i>\n\n"
@@ -142,6 +142,29 @@ def _lang_line(lang: str) -> str:
 
 def _no_chapters_text(lang: str) -> str:
     return NO_ID_CHAPTERS if lang == mangadex.INDONESIAN_LANG else NO_EN_CHAPTERS
+
+
+# ---------------------------------------------------------------------------
+# Nilai English untuk kartu detail /mangainfo (label kartu memakai English)
+# ---------------------------------------------------------------------------
+
+INFO_LANG_NAMES = {
+    mangadex.INDONESIAN_LANG: "Indonesian",
+    mangadex.ENGLISH_LANG: "English",
+}
+
+# nilai status sudah dipetakan mangadex.STATUS_ID ke Bahasa Indonesia
+INFO_STATUS_NAMES = {
+    "Berjalan": "Ongoing",
+    "Tamat": "Completed",
+    "Dibatalkan": "Cancelled",
+    "Hiatus": "Hiatus",
+    "Tidak diketahui": "Unknown",
+}
+
+
+def _info_status(status: str) -> str:
+    return INFO_STATUS_NAMES.get(status, status)
 
 
 # ---------------------------------------------------------------------------
@@ -221,43 +244,118 @@ def _title_caption(title: Title, show_category: bool = False,
     return _truncate("\n".join(parts), budget)
 
 
-def _info_text(title: Title, id_count: int | None, latest: str | None,
-               truncated: bool = False,
-               lang: str = mangadex.INDONESIAN_LANG) -> str:
-    """Pesan detail /mangainfo (limit 4096 karakter)."""
-    lines = [f"<b>{_escape(title.title)}</b>"]
+def _truncate_escaped(text: str, limit: int) -> str:
+    """Escape HTML lalu potong aman: tidak memotong entitas ``&amp;``/tag.
+
+    Dipakai untuk konten yang masuk ke kartu info, supaya panjang hasil escape
+    tetap terprediksi dan parsing HTML Telegram tidak rusak.
+    """
+    escaped = html_lib.escape(text or "")
+    if len(escaped) <= limit:
+        return escaped
+    cut = escaped[: max(limit - 3, 0)]
+    if "&" in cut:  # buang sisa entitas yang terpotong ("&am")
+        head, _, tail = cut.rpartition("&")
+        if ";" not in tail:
+            cut = head
+    parts = cut.rsplit(None, 1)  # potong di batas kata terakhir
+    if parts and parts[0]:
+        cut = parts[0]
+    return cut.rstrip() + "..."
+
+
+def _short_list(items: list[str], limit: int, sep: str = ", ") -> str:
+    """Daftar elemen pendek (dibatasi jumlah & panjangnya) agar kartu muat."""
+    shown = [_truncate_escaped(item, 40) for item in items[:limit]]
+    text = sep.join(shown)
+    extra = len(items) - limit
+    if extra > 0:
+        text += f" +{extra} more"
+    return text
+
+
+def _clean_synopsis(text: str) -> str:
+    """Rapikan sinopsis dari sumber: buang spasi tepi & rangkaian baris kosong.
+
+    Struktur paragraf asli dipertahankan (termasuk baris baru di dalam satu
+    paragraf), hanya spasi tepi dan baris kosong berlebihan yang dibersihkan.
+    """
+    paragraphs: list[str] = []
+    buffer: list[str] = []
+    for raw_line in text.replace("\r\n", "\n").replace("\r", "\n").split("\n"):
+        line = " ".join(raw_line.split())  # buang spasi tepi & rangkaian spasi
+        if line:
+            buffer.append(line)
+        elif buffer:
+            paragraphs.append("\n".join(buffer))
+            buffer = []
+    if buffer:
+        paragraphs.append("\n".join(buffer))
+    return "\n\n".join(paragraphs)
+
+
+def _info_text(title: Title, latest: str | None, languages: list[str],
+               budget: int = CAPTION_LIMIT) -> str:
+    """Kartu detail /mangainfo — format & label English sesuai contoh:
+
+        📚 Judul
+
+        Category: Manhwa
+        Status: Completed
+        Author: Chugong
+
+        Synopsis
+        <sinopsis dalam blok yang bisa dibuka>
+
+        Genres
+        Action • Adventure • Fantasy
+
+        Latest Chapter: Chapter 120
+        Available Language: Indonesian / English
+
+    `languages` = kode bahasa yang BENAR-BENAR punya chapter (diverifikasi
+    lewat feed, lihat ``_language_availability``). `budget` = batas karakter
+    pesan: ``CAPTION_LIMIT`` bila dikirim sebagai caption foto cover,
+    ``TEXT_LIMIT`` bila tidak ada cover (pesan teks biasa).
+    """
+    head = [f"<b>📚 {_truncate_escaped(title.title, 120)}</b>"]
     if title.indonesian_title and title.indonesian_title != title.title:
-        lines.append(f"🇮🇩 Judul Indonesia: {_escape(title.indonesian_title)}")
+        head.append(f"Indonesian Title: "
+                    f"{_truncate_escaped(title.indonesian_title, 80)}")
     if title.alt_titles:
-        lines.append("📖 Judul alternatif: " + _escape(", ".join(title.alt_titles)))
-    category = title.category.capitalize() if title.category else "Tidak terklasifikasi"
-    lines.append(f"📁 Kategori: {category}")
-    lines.append(f"🔤 Bahasa asal: {_escape(title.original_language)}")
+        head.append("Alt Titles: " + _short_list(title.alt_titles, 3))
+
+    category = title.category.capitalize() or "Unclassified"
+    meta = [f"Category: {_escape(category)}",
+            f"Status: {_escape(_info_status(title.status))}"]
     if title.author:
-        lines.append(f"✍️ Penulis: {_escape(title.author)}")
+        meta.append(f"Author: {_truncate_escaped(title.author, 60)}")
+
+    blocks = ["\n".join(head), "\n".join(meta)]
     if title.genres:
-        lines.append("🎭 Genre/Tag: " + _escape(", ".join(title.genres)))
-    lines.append(f"📢 Status publikasi: {_escape(title.status)}")
-    if id_count:
-        note = " (daftar terpotong)" if truncated else ""
-        latest_part = f" — terbaru: {_escape(latest)}" if latest else ""
-        lines.append(f"📚 Chapter {_lang_name(lang)}: {id_count}{latest_part}{note}")
-    else:
-        lines.append(f"📚 Chapter {_lang_name(lang)}: tidak tersedia")
+        blocks.append("Genres\n" + _short_list(title.genres, 6, sep=" • "))
 
-    synopsis = title.synopsis_id or title.synopsis
+    lang_names = [INFO_LANG_NAMES.get(code, code) for code in languages]
+    latest_text = f"Chapter {_escape(str(latest))}" if latest else "N/A"
+    language_text = " / ".join(lang_names) or "N/A"
+    blocks.append(f"Latest Chapter: {latest_text}\n"
+                  f"Available Language: {language_text}")
+    blocks.append(f'<a href="{title.url}">Open Source</a>\nSource: MangaDex')
+
+    synopsis = _clean_synopsis(title.synopsis_id or title.synopsis or "")
     if synopsis:
-        source_note = " (terjemahan Indonesia)" if title.synopsis_id else ""
-        # sisakan ruang untuk sisa blok pesan + tautan
-        footer = "\n\nSource: MangaDex\nWebsite: https://mangadex.org/"
-        budget_left = TEXT_LIMIT - len("\n".join(lines)) - len(footer) - 120
-        if budget_left > 40:
-            lines.append(f"📝 Sinopsis{source_note}:\n"
-                         f"<blockquote expandable>{_escape(_truncate(synopsis, budget_left))}</blockquote>")
+        header, open_tag, close_tag = ("Synopsis", "<blockquote expandable>",
+                                       "</blockquote>")
+        # sisakan ruang untuk semua blok lain + header & tag blok sinopsis
+        fixed = (sum(len(block) for block in blocks) + 2 * len(blocks)
+                 + len(header) + 1 + len(open_tag) + len(close_tag))
+        available = budget - fixed
+        if available > 40:
+            block = (f"{header}\n{open_tag}"
+                     f"{_truncate_escaped(synopsis, available)}{close_tag}")
+            blocks.insert(2, block)  # setelah judul & info dasar
 
-    lines.append(f'<a href="{title.url}">Buka di MangaDex</a>')
-    lines.append("Source: MangaDex")
-    return _truncate("\n".join(lines), TEXT_LIMIT - 100)
+    return _truncate("\n\n".join(blocks), budget)
 
 
 def _chapter_line(chapter: Chapter, releases: int = 1,
@@ -641,24 +739,64 @@ async def mangafeature_cmd(update: Update,
 # Alur detail / chapter / baca
 # ---------------------------------------------------------------------------
 
-async def _send_info(message, title: Title) -> None:
-    try:
-        chapters, truncated = await mangadex.get_indonesian_chapters(title.id)
-        id_count = len({(c.number or "oneshot") for c in chapters}) or None
-        latest = chapters[-1].number if chapters else None
-        if title.id_chapter_count is not None and id_count is None:
-            id_count = title.id_chapter_count
-            latest = title.latest_id_chapter
-            truncated = False
-    except MangaDexError as exc:
-        logger.warning("Gagal mengambil chapter untuk info %s: %s", title.id, exc)
-        id_count, latest, truncated = title.id_chapter_count, title.latest_id_chapter, False
-
-    text = _info_text(title, id_count, latest, truncated)
-    keyboard = InlineKeyboardMarkup([[
-        InlineKeyboardButton("📖 Chapters", url=title.url),
+def _info_keyboard(title: Title) -> InlineKeyboardMarkup:
+    """Tombol kartu info: buka daftar chapter + buka sumber."""
+    return InlineKeyboardMarkup([[
+        InlineKeyboardButton("📖 Read Chapters", url=title.url),
         InlineKeyboardButton("🌐 Open Source", url=title.url),
     ]])
+
+
+async def _language_availability(manga_id: str) -> dict[str, str | None]:
+    """{kode bahasa: chapter terbaru} untuk bahasa yang punya chapter.
+
+    Ketersediaan SELALU diverifikasi lewat chapter feed (metadata
+    ``availableTranslatedLanguages`` terbukti basi), jadi baris
+    "Available Language" tidak pernah menjanjikan bahasa yang kosong.
+    Pengecekan Bahasa Indonesia meneruskan error ke pemanggil; kegagalan
+    pengecekan Bahasa Inggris hanya dicatat supaya kartu info tetap tampil.
+    """
+    available: dict[str, str | None] = {}
+    total, latest = await mangadex.language_stats(
+        manga_id, mangadex.INDONESIAN_LANG)
+    if total > 0:
+        available[mangadex.INDONESIAN_LANG] = latest
+    try:
+        total, latest = await mangadex.language_stats(
+            manga_id, mangadex.ENGLISH_LANG)
+    except MangaDexError as exc:
+        logger.info("Cek chapter Inggris untuk %s gagal: %s", manga_id, exc)
+    else:
+        if total > 0:
+            available[mangadex.ENGLISH_LANG] = latest
+    return available
+
+
+async def _send_info(message, title: Title) -> None:
+    try:
+        available = await _language_availability(title.id)
+    except MangaDexError as exc:
+        if not title.id_chapter_count:
+            logger.warning("Info %s gagal: %s", title.id, exc)
+            await message.reply_text(_error_text(exc))
+            return
+        # statistik Indonesia sudah diketahui dari pencarian; info tetap tampil
+        logger.info("Statistik bahasa %s gagal (%s); pakai data tersimpan",
+                    title.id, exc)
+        available = {mangadex.INDONESIAN_LANG: title.latest_id_chapter}
+
+    latest = available.get(mangadex.INDONESIAN_LANG) or title.latest_id_chapter
+    keyboard = _info_keyboard(title)
+    if title.cover_url:
+        caption = _info_text(title, latest, list(available), budget=CAPTION_LIMIT)
+        try:
+            await message.reply_photo(photo=title.cover_url, caption=caption,
+                                      parse_mode="HTML", reply_markup=keyboard)
+            return
+        except Exception:
+            logger.info("Kirim cover info gagal untuk %s; fallback teks", title.id)
+
+    text = _info_text(title, latest, list(available), budget=TEXT_LIMIT)
     await message.reply_text(text, parse_mode="HTML", reply_markup=keyboard,
                              disable_web_page_preview=True)
 
@@ -1177,16 +1315,38 @@ async def _send_chapter_list_from_callback(query, title: Title, page: int,
 async def _send_info_from_callback(query, title: Title,
                                    lang: str = mangadex.INDONESIAN_LANG) -> None:
     try:
-        count, latest = await mangadex.language_stats(title.id, lang)
+        available = await _language_availability(title.id)
     except MangaDexError as exc:
         logger.warning("Callback: info %s gagal: %s", title.id, exc)
         await _edit_message(query, _error_text(exc), None)
         return
-    text = _info_text(title, count or None, latest, lang=lang)
-    keyboard = InlineKeyboardMarkup([[
-        InlineKeyboardButton("📖 Chapters", url=title.url),
-        InlineKeyboardButton("🌐 Open Source", url=title.url),
-    ]])
+
+    latest = available.get(lang)
+    languages = list(available)
+    keyboard = _info_keyboard(title)
+    # pesan hasil berupa foto -> cover-nya sudah tampil, cukup ganti caption
+    is_photo = bool(getattr(query.message, "photo", None))
+    if is_photo:
+        text = _info_text(title, latest, languages, budget=CAPTION_LIMIT)
+        await _edit_message(query, text, keyboard, as_caption=True)
+        return
+
+    # pesan teks (mis. pemilih judul) -> kirim cover + info sebagai foto baru
+    if title.cover_url:
+        caption = _info_text(title, latest, languages, budget=CAPTION_LIMIT)
+        try:
+            await query.message.reply_photo(photo=title.cover_url, caption=caption,
+                                            parse_mode="HTML", reply_markup=keyboard)
+        except Exception:
+            logger.info("Kirim cover info gagal untuk %s; fallback teks", title.id)
+        else:
+            try:
+                await query.message.delete()  # buang pesan pemilih/status lama
+            except Exception:
+                logger.info("Gagal menghapus pesan pemilih info lama")
+            return
+
+    text = _info_text(title, latest, languages, budget=TEXT_LIMIT)
     await _edit_message(query, text, keyboard)
 
 

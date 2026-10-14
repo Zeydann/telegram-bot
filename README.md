@@ -29,7 +29,7 @@ A Telegram bot that downloads TikTok, Instagram & Pinterest videos and photo pos
 - `/comic {judul}` — search both manga and manhwa
 - `/chapter {judul}` — list the available Indonesian chapters
 - `/read {judul} {chapter}` — read an Indonesian chapter
-- `/mangainfo {judul}` — detailed information about a title
+- `/mangainfo {judul}` — detailed information about a title, sent as a photo with the cover image and a tidy info card as its caption
 - `/mangafeature` — show the manga & manhwa command list
 - `/pdf` — convert the replied PDF document to `.docx`
 - `/word` — convert the replied Word document to `.pdf`

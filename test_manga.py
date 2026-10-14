@@ -174,6 +174,16 @@ def last_edit_text(message):
     return ""
 
 
+def last_reply_body(message):
+    """Caption foto terakhir, atau pesan teks terakhir, dari balasan bot."""
+    for entry in reversed(message.replies):
+        if entry.get("caption"):
+            return entry["caption"]
+        if "text" in entry:
+            return entry["text"]
+    return ""
+
+
 # ---------------------------------------------------------------------------
 # Provider: filter Bahasa Indonesia (inti fitur)
 # ---------------------------------------------------------------------------
@@ -1034,35 +1044,123 @@ class InfoAndFeatureTests(unittest.IsolatedAsyncioTestCase):
     async def test_mangainfo_shows_details_and_source(self):
         message = FakeMessage(text="/mangainfo One Piece")
         title = make_title()
-        chapters = [make_chapter("c1", "10")]
         with mock.patch.object(mangadex, "search_titles", async_return([title])), \
-                mock.patch.object(mangadex, "indonesian_stats",
-                                  async_return((1, "10"))), \
-                mock.patch.object(mangadex, "get_indonesian_chapters",
-                                  async_return((chapters, False))):
+                mock.patch.object(mangadex, "language_stats",
+                                  async_return((1, "10"))):
             await manga.mangainfo_cmd(make_update(message),
                                       make_context(["One", "Piece"]))
 
-        text = last_reply_text(message)
-        self.assertIn("One Piece", text)
-        self.assertIn("Kategori: Manga", text)
-        self.assertIn("Bahasa asal: Jepang", text)
-        self.assertIn("Chapter Indonesia: 1", text)
-        self.assertIn("terbaru: 10", text)
+        photos = [r for r in message.replies if "photo" in r]
+        self.assertEqual(len(photos), 1, "cover harus dikirim sebagai foto")
+        self.assertEqual(photos[0]["photo"], "https://covers/cover.jpg")
+        self.assertEqual(photos[0].get("parse_mode"), "HTML")
+
+        text = photos[0]["caption"]
+        # format kartu sesuai contoh: judul -> info dasar -> sinopsis -> dst.
+        self.assertIn("📚 One Piece", text)
+        self.assertIn("Category: Manga", text)
+        self.assertIn("Status: Ongoing", text)
+        self.assertIn("Author: Oda", text)
+        self.assertIn("Alt Titles: OP", text)
+        self.assertIn("Genres\nAction", text)
+        self.assertIn("Latest Chapter: Chapter 10", text)
+        self.assertIn("Available Language: Indonesian / English", text)
         self.assertIn("Source: MangaDex", text)
         self.assertIn("https://mangadex.org/", text)
+        self.assertIn("<blockquote expandable>", text)
+        self.assertIn("</blockquote>", text)
+        self.assertLess(text.index("Category:"), text.index("Synopsis"))
+        self.assertLess(text.index("Synopsis"), text.index("Genres"))
+        self.assertLess(text.index("Genres"), text.index("Latest Chapter"))
+        # wajib muat sebagai caption foto
+        self.assertLessEqual(len(text), manga.CAPTION_LIMIT)
+        labels = [btn.text for row in photos[0]["reply_markup"].inline_keyboard
+                  for btn in row]
+        self.assertIn("📖 Read Chapters", labels)
+        self.assertIn("🌐 Open Source", labels)
+
+    async def test_mangainfo_without_cover_falls_back_to_text(self):
+        message = FakeMessage(text="/mangainfo One Piece")
+        title = make_title(cover_url=None)
+        with mock.patch.object(mangadex, "search_titles", async_return([title])), \
+                mock.patch.object(mangadex, "language_stats",
+                                  async_return((1, "10"))):
+            await manga.mangainfo_cmd(make_update(message),
+                                      make_context(["One", "Piece"]))
+
+        self.assertFalse([r for r in message.replies if "photo" in r])
+        text = last_reply_body(message)
+        self.assertIn("📚 One Piece", text)
+        self.assertIn("Latest Chapter: Chapter 10", text)
+        self.assertIn("Available Language: Indonesian / English", text)
+        self.assertIn("Source: MangaDex", text)
+
+    async def test_info_caption_stays_within_limit(self):
+        """Judul/genre/sinopsis panjang tetap muat & tag tidak terpotong."""
+        title = make_title(
+            title="<b>Judul & Kawan</b>",
+            synopsis=("Paragraf pertama yang panjang sekali. " * 60).strip()
+                      + "\n\n\n\n" + "Paragraf kedua.",
+            alt_titles=[f"Judul alternatif nomor {i}" for i in range(10)],
+            genres=[f"Genre nomor {i}" for i in range(15)],
+        )
+        text = manga._info_text(title, "10", ["id", "en"])
+
+        self.assertLessEqual(len(text), manga.CAPTION_LIMIT)
+        self.assertTrue(text.endswith("Source: MangaDex"))
+        self.assertNotIn("&lt;blockquote", text)  # tag tidak ikut ter-escape
+        if "<blockquote" in text:
+            self.assertIn("</blockquote>", text)
+        self.assertIn("&lt;b&gt;Judul &amp; Kawan&lt;/b&gt;", text)
+        self.assertIn("+9 more", text)   # 15 genre -> 6 ditampilkan
+        self.assertIn("+7 more", text)   # 10 judul alternatif -> 3 ditampilkan
+        self.assertIn("Available Language: Indonesian / English", text)
 
     async def test_mangainfo_notes_missing_indonesian(self):
         message = FakeMessage(text="/mangainfo Zzz")
         title = make_title(id_count=None, latest=None)
         with mock.patch.object(mangadex, "search_titles", async_return([title])), \
-                mock.patch.object(mangadex, "indonesian_stats",
-                                  async_return((0, None))), \
-                mock.patch.object(mangadex, "get_indonesian_chapters",
-                                  async_return(([], False))):
+                mock.patch.object(mangadex, "language_stats",
+                                  async_return((0, None))):
             await manga.mangainfo_cmd(make_update(message), make_context(["Zzz"]))
 
-        self.assertIn("Chapter Indonesia: tidak tersedia", last_reply_text(message))
+        text = last_reply_body(message)
+        self.assertIn("Latest Chapter: N/A", text)
+        self.assertIn("Available Language: N/A", text)
+
+    async def test_info_button_updates_cover_caption(self):
+        """Tombol 'Manga Info' di hasil pencarian foto -> caption diganti info."""
+        message = FakeMessage(text="hasil pencarian")
+        message.photo = ["photo-file"]      # hasil pencarian berupa cover
+        title = make_title()
+        token = manga._new_session(kind="search", titles=[title],
+                                   category="manga")
+        query = FakeCallbackQuery(f"mg|i|{token}|0", message=message)
+        with mock.patch.object(mangadex, "language_stats",
+                               async_return((10, "10"))):
+            await manga.manga_callback(make_callback_update(query), mock.Mock())
+
+        captions = [e for e in query.edits if "caption" in e]
+        self.assertEqual(len(captions), 1, "info harus mengedit caption foto")
+        self.assertIn("One Piece", captions[0]["caption"])
+        self.assertLessEqual(len(captions[0]["caption"]), manga.CAPTION_LIMIT)
+
+    async def test_info_from_picker_sends_cover_photo(self):
+        """Dari pesan pemilih judul (teks) -> cover + info dikirim sebagai foto."""
+        message = FakeMessage(text="Silakan pilih salah satu hasil pencarian.")
+        title = make_title()
+        token = manga._new_session(kind="resolve", purpose="info",
+                                   query="One Piece", titles=[title])
+        query = FakeCallbackQuery(f"mg|p|{token}|0", message=message)
+        with mock.patch.object(mangadex, "language_stats",
+                               async_return((10, "10"))):
+            await manga.manga_callback(make_callback_update(query), mock.Mock())
+
+        photos = [r for r in message.replies if "photo" in r]
+        self.assertEqual(len(photos), 1)
+        self.assertEqual(photos[0]["photo"], "https://covers/cover.jpg")
+        self.assertIn("One Piece", photos[0]["caption"])
+        self.assertTrue(message.deleted, "pesan pemilih lama harus dibersihkan")
 
     async def test_mangafeature_lists_all_commands(self):
         message = FakeMessage(text="/mangafeature")
