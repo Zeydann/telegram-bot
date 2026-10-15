@@ -6,10 +6,13 @@ import tempfile
 import html as html_lib
 
 from config import (
-    BOT_TOKEN, RATE_LIMIT_COUNT, RATE_LIMIT_WINDOW, ADMIN_ID, DOWNLOAD_DIR,
+    BOT_TOKEN, RATE_LIMIT_COUNT, RATE_LIMIT_WINDOW, is_admin, DOWNLOAD_DIR,
     CONVERT_MAX_FILE_SIZE, MAX_FILE_SIZE,
 )
+from logviewer import LOG_FORMAT, logs_cmd, setup_file_logging
 from mal import search_anime, fetch_hd_image
+from monitor import health_cmd, status_cmd
+from stats import enable as enable_stats, mark_failed, record, stats_cmd, track
 from utils import extract_url, is_tiktok_url, is_instagram_url, is_pinterest_url, sanitize_filename, RateLimiter, ProgressReporter
 from telegram import Update, InputMediaPhoto, InputMediaVideo
 from telegram.request import HTTPXRequest
@@ -44,7 +47,7 @@ from manga import (
 )
 
 logging.basicConfig(
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    format=LOG_FORMAT,
     level=logging.INFO,
 )
 logger = logging.getLogger("tiktok_bot")
@@ -62,6 +65,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "/word — reply to a Word file to get a PDF (Word → PDF conversion powered by iLovePDF)\n\n"
         "Manga & manhwa (Bahasa Indonesia):\n"
         "/manga, /manhwa, /comic, /chapter, /read, /mangainfo\n\n"
+        "Server monitor:\n"
+        "/status — server resource (CPU, RAM, disk, uptime)\n"
+        "/health — bot & dependency health check\n"
+        "/stats — bot usage statistics\n"
+        "/logs — latest bot logs (admin only)\n\n"
         "/feature — see all available features\n"
         "/mangafeature — see manga & manhwa commands"
     )
@@ -91,6 +99,12 @@ FEATURES = (
     ("Dokumen", "📄", (
         ("PDF to Word", "Konversi file PDF menjadi dokumen Word (.docx).", "/pdf"),
         ("Word to PDF", "Konversi dokumen Word (.docx) menjadi file PDF.", "/word"),
+    )),
+    ("Server Monitor", "📊", (
+        ("Status Server", "Kondisi resource server real-time (CPU, RAM, disk, uptime).", "/status"),
+        ("Health Check", "Cek kesehatan bot, direktori, disk, layanan eksternal.", "/health"),
+        ("Statistik Bot", "Statistik penggunaan: permintaan, pengguna, fitur.", "/stats"),
+        ("Log Bot", "Ambil log terbaru (khusus admin).", "/logs"),
     )),
     ("Lainnya", "⚙️", (
         ("Welcome", "Pesan sambutan dan petunjuk singkat bot.", "/start"),
@@ -131,6 +145,7 @@ async def anime(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         result = await search_anime(query)
     except Exception:
         logger.exception("MAL search failed for %s", query)
+        mark_failed()  # sumber eksternal gagal → jangan dihitung berhasil di /stats
         await status_msg.edit_text("Gagal menghubungi MyAnimeList. Coba lagi nanti.")
         return
 
@@ -174,7 +189,7 @@ async def anime(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def restart_bot(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not ADMIN_ID or str(update.effective_user.id) != str(ADMIN_ID):
+    if not is_admin(update.effective_user.id):
         await update.message.reply_text("Kamu tidak punya akses untuk perintah ini.")
         return
     status = await update.message.reply_text("Merestart bot...")
@@ -255,6 +270,7 @@ async def _handle_conversion(update: Update, context: ContextTypes.DEFAULT_TYPE,
     try:
         ext = validate_document(file_name, document.mime_type, document.file_size, command)
     except ConversionError as e:
+        record(command, user.id, False)  # permintaan konversi ditolak → gagal
         await message.reply_text(str(e))
         return
 
@@ -307,12 +323,15 @@ async def _handle_conversion(update: Update, context: ContextTypes.DEFAULT_TYPE,
         except Exception:
             pass  # gagal hapus pesan status tidak menggagalkan konversi
         logger.info("Conversion %s completed for user %s", command, user.id)
+        record(command, user.id, True)
 
     except ConversionError as e:
         logger.warning("Conversion %s failed for user %s: %s", command, user.id, e)
+        record(command, user.id, False)
         await _edit_status(status_msg, f"Gagal: {e}")
     except Exception:
         logger.exception("Unexpected conversion error for user %s", user.id)
+        record(command, user.id, False)
         await _edit_status(status_msg, "Terjadi kesalahan tak terduga. Silakan coba lagi nanti.")
     finally:
         _converting_users.discard(user.id)
@@ -363,6 +382,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return
 
     platform = "TikTok" if is_tiktok else ("Instagram" if is_instagram else "Pinterest")
+    feature = platform.lower()  # kunci statistik (tiktok/instagram/pinterest)
     logger.info("User %s requested %s URL", user.id, platform)
     status_msg = await message.reply_text("Memproses link...")
 
@@ -387,19 +407,19 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
         await status_msg.delete()
         logger.info("Download completed for user %s", user.id)
+        record(feature, user.id, True)
 
     except DownloadError as e:
         logger.error("Download failed for user %s: %s", user.id, e)
+        record(feature, user.id, False)
         await status_msg.edit_text(f"Gagal: {e}")
     except Exception:
         logger.exception("Unexpected error handling message from user %s", user.id)
+        record(feature, user.id, False)
         await status_msg.edit_text("Terjadi kesalahan tak terduga. Silakan coba lagi nanti.")
     finally:
         if job_dir:
             cleanup_job(job_dir)
-
-
-import html as html_lib
 
 
 def _build_caption(author: str | None, description: str | None) -> str:
@@ -518,6 +538,7 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
 
 
 def main() -> None:
+    setup_file_logging()  # file rotating untuk /logs (jurnal systemd tetap jalan)
     request = HTTPXRequest(
         connect_timeout=15,
         read_timeout=60,
@@ -526,6 +547,9 @@ def main() -> None:
     )
     # Konfirmasi restart otomatis kalau sebelumnya ada /restart
     async def _on_startup(app):
+        # Statistik baru dicatat saat bot benar-benar berjalan — mengimpor
+        # modul / menjalankan test tidak pernah menulis data statistik produksi.
+        enable_stats()
         flag = os.path.join(DOWNLOAD_DIR, ".restart_flag")
         if os.path.exists(flag):
             try:
@@ -542,20 +566,28 @@ def main() -> None:
 
     app = Application.builder().token(BOT_TOKEN).request(request).post_init(_on_startup).build()
 
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("feature", feature))
-    app.add_handler(CommandHandler("anime", anime))
-    app.add_handler(CommandHandler("restart", restart_bot))
+    app.add_handler(CommandHandler("start", track("start", start)))
+    app.add_handler(CommandHandler("feature", track("feature", feature)))
+    app.add_handler(CommandHandler("anime", track("anime", anime)))
+    app.add_handler(CommandHandler("restart", track("restart", restart_bot)))
+    # /pdf dan /word tidak dibungkus track(): hasil konversi dicatat langsung
+    # oleh _handle_conversion() supaya berhasil/gagalnya akurat.
     app.add_handler(CommandHandler("pdf", pdf_command))
     app.add_handler(CommandHandler("word", word_command))
+    # Server monitor: /status, /health untuk semua user; /logs khusus admin
+    # (otorisasi di dalam logs_cmd, sebelum file log dibaca); /stats untuk semua.
+    app.add_handler(CommandHandler("status", track("status", status_cmd)))
+    app.add_handler(CommandHandler("health", track("health", health_cmd)))
+    app.add_handler(CommandHandler("stats", track("stats", stats_cmd)))
+    app.add_handler(CommandHandler("logs", track("logs", logs_cmd)))
     # Manga & manhwa Indonesia (sumber: MangaDex)
-    app.add_handler(CommandHandler("manga", manga_cmd))
-    app.add_handler(CommandHandler("manhwa", manhwa_cmd))
-    app.add_handler(CommandHandler("comic", comic_cmd))
-    app.add_handler(CommandHandler("chapter", chapter_cmd))
-    app.add_handler(CommandHandler("read", read_cmd))
-    app.add_handler(CommandHandler("mangainfo", mangainfo_cmd))
-    app.add_handler(CommandHandler("mangafeature", mangafeature_cmd))
+    app.add_handler(CommandHandler("manga", track("manga", manga_cmd)))
+    app.add_handler(CommandHandler("manhwa", track("manhwa", manhwa_cmd)))
+    app.add_handler(CommandHandler("comic", track("comic", comic_cmd)))
+    app.add_handler(CommandHandler("chapter", track("chapter", chapter_cmd)))
+    app.add_handler(CommandHandler("read", track("read", read_cmd)))
+    app.add_handler(CommandHandler("mangainfo", track("mangainfo", mangainfo_cmd)))
+    app.add_handler(CommandHandler("mangafeature", track("mangafeature", mangafeature_cmd)))
     app.add_handler(
         CallbackQueryHandler(manga_callback, pattern=r"^mg\|")
     )

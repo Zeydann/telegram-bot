@@ -36,6 +36,8 @@ from mangadex import (
     Title,
     manga_url,
 )
+# Menandai kegagalan sumber (MangaDex) sebagai permintaan gagal di /stats
+from stats import mark_failed
 
 logger = logging.getLogger(__name__)
 
@@ -561,6 +563,7 @@ async def _cmd_search(update: Update, context: ContextTypes.DEFAULT_TYPE,
         titles = await _resolve_titles(query_text, category)
     except MangaDexError as exc:
         logger.warning("Pencarian %r gagal: %s", query_text, exc)
+        mark_failed()
         await status_msg.edit_text(_error_text(exc))
         return
 
@@ -627,6 +630,7 @@ async def chapter_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         titles = await _resolve_titles(query_text, None)
     except MangaDexError as exc:
         logger.warning("Pencarian chapter %r gagal: %s", query_text, exc)
+        mark_failed()
         await status_msg.edit_text(_error_text(exc))
         return
 
@@ -668,6 +672,7 @@ async def mangainfo_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
                     break
     except MangaDexError as exc:
         logger.warning("Info %r gagal: %s", query_text, exc)
+        mark_failed()
         await status_msg.edit_text(_error_text(exc))
         return
 
@@ -706,6 +711,7 @@ async def read_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         titles = await _resolve_titles(query_text, None)
     except MangaDexError as exc:
         logger.warning("Read %r gagal: %s", query_text, exc)
+        mark_failed()
         await status_msg.edit_text(_error_text(exc))
         return
 
@@ -778,6 +784,7 @@ async def _send_info(message, title: Title) -> None:
     except MangaDexError as exc:
         if not title.id_chapter_count:
             logger.warning("Info %s gagal: %s", title.id, exc)
+            mark_failed()
             await message.reply_text(_error_text(exc))
             return
         # statistik Indonesia sudah diketahui dari pencarian; info tetap tampil
@@ -807,6 +814,7 @@ async def _send_chapter_list(message, title: Title, page: int,
         chapters, truncated = await mangadex.get_chapters(title.id, lang)
     except MangaDexError as exc:
         logger.warning("Gagal mengambil chapter %s: %s", title.id, exc)
+        mark_failed()
         await message.reply_text(_error_text(exc))
         return
 
@@ -861,6 +869,7 @@ async def _start_read(message, title: Title, number: float,
         releases = await mangadex.get_releases(title.id, number, lang)
     except MangaDexError as exc:
         logger.warning("Mengambil rilisan ch %s/%s gagal: %s", title.id, number, exc)
+        mark_failed()
         await message.reply_text(_error_text(exc))
         return
 
@@ -923,6 +932,7 @@ async def _send_pages(message, title: Title, chapter: Chapter,
         pages = await mangadex.get_pages(chapter.id)
     except MangaDexError as exc:
         logger.warning("At-home chapter %s gagal: %s", chapter.id, exc)
+        mark_failed()
         await status_msg.edit_text(_error_text(exc))
         return
 

@@ -3,6 +3,8 @@ __pycache__/
 *.pyc
 venv/
 *.log
+logs/
+data/
 debug_scrape.py
 debug_output.json
 *.save

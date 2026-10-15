@@ -3,9 +3,17 @@ import time
 import uuid
 import logging
 from collections import defaultdict, deque
+from datetime import datetime, timedelta, timezone
 from urllib.parse import urlparse
 
 logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Zona waktu — semua jam yang ditampilkan ke user selalu WIB (UTC+07:00).
+# Offset tetap dipakai karena WIB tidak punya daylight saving dan supaya
+# tidak bergantung pada timezone sistem (server produksi berjalan dalam UTC).
+# ---------------------------------------------------------------------------
+WIB = timezone(timedelta(hours=7), name="WIB")
 
 TIKTOK_DOMAINS = (
     "tiktok.com",
@@ -142,3 +150,53 @@ class ProgressReporter:
     def _make_bar(percent: int, length: int = 12) -> str:
         filled = int(length * percent / 100)
         return "[" + "█" * filled + "░" * (length - filled) + "]"
+
+
+def now_wib() -> datetime:
+    """Waktu sekarang dalam WIB (UTC+07:00)."""
+    return datetime.now(WIB)
+
+
+def wib_text(moment: datetime | None = None,
+             fmt: str = "%Y-%m-%d %H:%M") -> str:
+    """Format waktu → ``"2026-10-15 11:20 WIB"``; default: waktu sekarang.
+
+    ``moment`` boleh naive (dianggap sudah WIB) atau bertz — semuanya
+    dikonversi dulu ke WIB sebelum diformat.
+    """
+    when = moment if moment is not None else now_wib()
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=WIB)
+    return when.astimezone(WIB).strftime(fmt) + " WIB"
+
+
+def format_duration(seconds: float | None) -> str:
+    """Format durasi (detik) → '12d 4h 33m 09s'; None → 'n/a'."""
+    if seconds is None:
+        return "n/a"
+    total = max(0, int(seconds))
+    days, rem = divmod(total, 86400)
+    hours, rem = divmod(rem, 3600)
+    minutes, secs = divmod(rem, 60)
+    parts: list[str] = []
+    if days:
+        parts.append(f"{days}d")
+    if days or hours:
+        parts.append(f"{hours}h")
+    if days or hours or minutes:
+        parts.append(f"{minutes}m")
+    parts.append(f"{secs:02d}s")
+    return " ".join(parts)
+
+
+def human_bytes(size: float | None) -> str:
+    """Format byte → '7.8 GB' (basis 1024); None → 'n/a'."""
+    if size is None:
+        return "n/a"
+    value = float(size)
+    if value < 1024:
+        return f"{int(value)} B"
+    for unit in ("KB", "MB", "GB", "TB", "PB"):
+        value /= 1024
+        if value < 1024 or unit == "PB":
+            return f"{value:.1f} {unit}"

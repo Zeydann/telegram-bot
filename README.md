@@ -12,6 +12,11 @@ A Telegram bot that downloads TikTok, Instagram & Pinterest videos and photo pos
 - `/manga`, `/manhwa`, `/comic`, `/chapter`, `/read`, `/mangainfo` — Indonesian-language manga & manhwa search and reading via the official MangaDex API (Indonesian chapters first; English chapters are only searched and shown after the user explicitly confirms via a `Yes, English` / `No, Cancel` inline button)
 - `/pdf` — converts an uploaded PDF into an editable Word `.docx` (reply to the document, or send the PDF with `/pdf` as caption)
 - `/word` — converts an uploaded Word `.docx`/`.doc` into a PDF (reply to the document, or send it with `/word` as caption)
+- `/status` — live server stats: uptime, CPU, RAM and disk usage with NORMAL/WARNING/CRITICAL indicators
+- `/health` — health check of the bot process, working directories, free disk space and external dependencies (Telegram API, MangaDex, MyAnimeList, iLovePDF when configured) with per-check timeouts
+- `/stats` — persistent usage statistics: requests, successes/failures, unique users and per-feature usage
+- `/logs` — tail of the latest bot log lines, level filterable, **admin only**, sanitized before sending
+- All displayed timestamps are in **WIB (UTC+07:00)** — the `/status` and `/health` check time, `/stats` last-request time, every log line's `asctime`, and `.txt` log download filenames — regardless of the server's own timezone
 - `/feature` — lists every feature that is actually implemented in the bot, grouped by category
 - `/mangafeature` — lists the manga & manhwa commands
 - `/restart` — restart the bot service (admin only, requires a passwordless sudo rule)
@@ -34,6 +39,10 @@ A Telegram bot that downloads TikTok, Instagram & Pinterest videos and photo pos
 - `/pdf` — convert the replied PDF document to `.docx`
 - `/word` — convert the replied Word document to `.pdf`
 - `/feature` — show the list of available features
+- `/status` — show live server resource usage (uptime, CPU, RAM, disk)
+- `/health` — run the bot & dependency health check
+- `/stats` — show persistent bot usage statistics
+- `/logs [count] [level]` — tail the latest log lines (only `ADMIN_ID` / `ADMIN_IDS`; level e.g. `INFO`, `WARNING`, `ERROR`)
 - `/restart` — restart the service (only for `ADMIN_ID`)
 
 ## Tech Stack
@@ -54,11 +63,15 @@ A Telegram bot that downloads TikTok, Instagram & Pinterest videos and photo pos
 - `manga.py` — manga/manhwa command handlers, inline keyboards and callback routing
 - `mangadex.py` — MangaDex API provider (search, Indonesian chapter feeds, pages)
 - `converter.py` — document conversion (`/pdf` locally, `/word` through the iLovePDF API)
-- `config.py` — loads environment variables
-- `utils.py` — URL validation, filename sanitization, rate limiter, progress reporter
+- `monitor.py` — server monitoring: `/status` resource usage and `/health` checks
+- `logviewer.py` — rotating file logging, log tail reader, secret redaction, `/logs`
+- `stats.py` — persistent usage statistics (recording + `/stats`)
+- `config.py` — loads environment variables (admin list, thresholds, paths)
+- `utils.py` — URL validation, filename sanitization, rate limiter, progress reporter, formatting helpers
 - `test_conversion.py` — automated tests for the conversion feature
 - `test_feature.py` — automated tests for the `/feature` command
 - `test_manga.py` — automated tests for the manga/manhwa feature (no network needed)
+- `test_monitor.py` — automated tests for `/status`, `/health`, `/logs` and `/stats` (no network needed)
 - `requirements.txt` — Python dependencies
 - `.env.example` — environment variable template
 
@@ -66,7 +79,8 @@ A Telegram bot that downloads TikTok, Instagram & Pinterest videos and photo pos
 | Key | Description |
 | --- | --- |
 | `BOT_TOKEN` | Token from @BotFather (required) |
-| `ADMIN_ID` | Telegram user ID allowed to use `/restart` |
+| `ADMIN_ID` | Telegram user ID allowed to use `/restart` and `/logs` |
+| `ADMIN_IDS` | Optional comma-separated list of admin IDs, e.g. `111111,222222` (merged with `ADMIN_ID`) |
 | `INSTAGRAM_COOKIEFILE` | Optional path to Instagram `cookies.txt` (for login-required posts) |
 | `DOWNLOAD_DIR` | Temp download directory (default `/tmp/tiktok_bot`) |
 | `MAX_FILE_SIZE` | Max media size in bytes (default 50MB — Telegram bot limit) |
@@ -76,6 +90,44 @@ A Telegram bot that downloads TikTok, Instagram & Pinterest videos and photo pos
 | `CONVERT_MAX_FILE_SIZE` | Max document size for conversion (default 20MB — Telegram `getFile` limit) |
 | `CONVERT_TIMEOUT` | Per-request conversion timeout in seconds (default 120) |
 | `CONVERT_MAX_CONCURRENT` | How many conversions may run at the same time (default 2) |
+| `CPU_WARNING` / `CPU_CRITICAL` | CPU usage thresholds in percent for `/status` (default 70 / 90) |
+| `RAM_WARNING` / `RAM_CRITICAL` | RAM usage thresholds in percent (default 80 / 90) |
+| `DISK_WARNING` / `DISK_CRITICAL` | Disk usage thresholds in percent (default 80 / 90) |
+| `MIN_FREE_DISK_MB` | Free disk space (MB) below which `/health` reports a warning (default 500) |
+| `HEALTH_TIMEOUT` | Timeout in seconds per external `/health` check (default 5) |
+| `LOG_FILE` | Log file read by `/logs` (default `logs/bot.log` in the project directory) |
+| `LOG_MAX_BYTES` / `LOG_BACKUP_COUNT` | Log rotation size and kept backups (default 1MB / 3) |
+| `STATS_FILE` | Persistent statistics file for `/stats` (default `data/stats.json`) |
+
+## Server Monitor
+
+Four commands, no extra dependencies beyond what the bot already uses:
+
+| Command | Who | What it does |
+| --- | --- | --- |
+| `/status` | everyone | Live uptime (server & bot), CPU, RAM and disk usage with `NORMAL` / `WARNING` / `CRITICAL` indicators. CPU is sampled over a short interval **in a worker thread**, so the bot keeps responding while the command runs. |
+| `/health` | everyone | One line per check: bot process, download/stat/log directories, free disk, Telegram API, MangaDex, MyAnimeList, and iLovePDF (only configured — shown as `SKIP` otherwise). External checks have a `HEALTH_TIMEOUT` timeout and are tagged `[layanan eksternal]` so they are never confused with internal failures. The project has no database, so no database check exists. |
+| `/stats` | everyone | Requests processed, successes/failures, unique users, per-feature usage (TikTok/Instagram/Pinterest downloads, PDF/Word conversions, anime & manga commands, …), last request time. Stored in `STATS_FILE` (JSON, atomic writes) so counts survive restarts; counting starts when the feature is first active. |
+| `/logs [count] [level]` | **admin only** | Tail of the newest log lines (default 50, max 200) from the rotating file handler, optional level filter (`/logs 30 ERROR`). Long output is sent as a `.txt` attachment. Authorization runs **before** the file is touched and uses Telegram **user IDs** from `ADMIN_ID`/`ADMIN_IDS` (never usernames). Every line is redacted (bot token, `*_KEY`/`*_TOKEN`/`password`-style values, JWT, `Bearer …`) before it leaves the server, and reading is done backwards in chunks so large files are never loaded whole. |
+
+Security notes:
+- There is no command that executes shell/server commands.
+- `.env` is never read by `/logs`; only the log file is, and its content is sanitized.
+- Log and stats files are created with `0600` permissions (directory `0700`).
+- Non-admin users receive the same plain rejection as for `/restart` when trying `/logs`;
+  `/status`, `/health` and `/stats` intentionally show no filesystem paths except in
+  `/health`, and never expose credentials.
+
+### Setting the admin Telegram ID
+1. Message [@userinfobot](https://t.me/userinfobot) (or any user-info bot) — it replies with your numeric ID.
+2. Put it in `.env`:
+   ```bash
+   ADMIN_ID=123456789            # single admin
+   # or several admins:
+   ADMIN_IDS=123456789,987654321
+   ```
+3. Restart the bot. Authorization always compares the numeric Telegram user ID —
+   changing your username does not affect access.
 
 ## Document Conversion (`/pdf` and `/word`)
 
@@ -262,6 +314,7 @@ source venv/bin/activate
 python test_conversion.py
 python test_feature.py
 python test_manga.py
+python test_monitor.py
 ```
 
 The conversion suite covers: valid PDF → DOCX conversion, Word → PDF through a mocked iLovePDF API,
@@ -280,6 +333,19 @@ argument parsing, release pickers for multiple scanlation groups, chapter pagina
 inline-button flows (view chapters, info, next results, previous/next chapter),
 expired/invalid/duplicate callbacks, source-error and rate-limit messages, HTML escaping,
 `/feature` registration and handler routing.
+
+The monitor suite runs fully offline (no real network calls, no real log/stat file of the
+bot) and covers: `/status` message structure and HTML validity with mocked measurements,
+NORMAL/WARNING/CRITICAL thresholds, real `/proc` readings falling back safely to `n/a`,
+`/health` directory and disk checks (missing directory, low disk, unwritable path),
+external checks with timeout and internal-vs-external failure tagging, iLovePDF reported
+as `SKIP` when not configured, `/logs` authorization (non-admin is rejected **before** any
+file access), level/count argument parsing, tail reading with level filter, secret
+redaction (bot token, keys, JWT, `Bearer`), send-as-file for long output, missing log
+file message, persistent `/stats` recording across a simulated restart, success/failure
+counting through the `track()` wrapper (including `mark_failed()`), and the fact that
+simply importing the modules or running the suites never writes the production
+statistics file.
 
 ## Troubleshooting
 - **Download fails for most video links**: update yt-dlp (`pip install -U yt-dlp`) — TikTok frequently changes its site structure.
